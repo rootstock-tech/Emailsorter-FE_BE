@@ -1,0 +1,501 @@
+/* RootStock Technology palette: warm cream background, deep navy text,
+   forest-green accent -- matches rootstocktech.co.in. */
+:root {
+  --bg: #fcfbf9;
+  --card: #ffffff;
+  --text: #0b182f;
+  --muted: #5b6472;
+  --accent: #415b3e;
+  --accent-hover: #33472f;
+  --bar: #415b3e;
+  --draft-accent: #a8781f; /* warm gold, distinct from the green accent */
+  --border: #e4e0d6;
+  --track: #f1efe8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden; /* the page itself never scrolls; individual columns do */
+}
+
+body {
+  margin: 0;
+  font-family: "Merriweather", Georgia, "Times New Roman", serif;
+  background: var(--bg);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+}
+
+/* Animated RootStock-style tree, faint, behind everything */
+.tree-bg {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.08;
+}
+
+.tree-bg svg {
+  width: 100%;
+  height: 100%;
+}
+
+/* Header bar */
+.topbar {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 1.5rem;
+  background: var(--track);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 1.2rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.brand-logo {
+  height: 34px;
+  width: auto;
+}
+
+.brand .brand-accent {
+  color: var(--accent);
+}
+
+.brand-sub {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 400;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-top: 0.1rem;
+}
+
+.user-box {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.user-email {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+/* Layout: full-width two-column grid, no page-level scrollbar -- fills the
+   left/right space instead of a narrow centered column. */
+main {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  min-height: 0; /* allow children to scroll within a flex parent */
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+  padding: 1.5rem 2rem;
+  overflow: hidden;
+}
+
+.col {
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 0.25rem;
+}
+
+.span-2 {
+  grid-column: 1 / -1;
+}
+
+/* Connect-Gmail screen: a compact, centered, softly-styled card rather than a
+   full-width box. justify-self centers it horizontally even without :has(),
+   and :has() also centers it vertically on browsers that support it. */
+main:has(#auth-card:not(.hidden)) {
+  align-content: center;
+}
+
+#auth-card {
+  justify-self: center;
+  align-self: center;
+  max-width: 420px;
+  width: 100%;
+  text-align: center;
+  padding: 2.75rem 2.25rem;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: radial-gradient(
+      130% 120% at 50% -10%,
+      rgba(65, 91, 62, 0.1),
+      transparent 55%
+    ),
+    var(--card);
+  box-shadow: 0 18px 40px rgba(11, 24, 47, 0.08);
+}
+
+#auth-card h2 {
+  margin-top: 0;
+  font-size: 1.5rem;
+}
+
+#auth-card .muted {
+  margin: 0.5rem auto 1.5rem;
+  max-width: 32ch;
+}
+
+#auth-card .btn {
+  padding: 0.75rem 1.75rem;
+  font-size: 1rem;
+}
+
+@media (max-width: 900px) {
+  html,
+  body {
+    overflow: auto;
+  }
+  main {
+    grid-template-columns: 1fr;
+    overflow: visible;
+  }
+  .col {
+    overflow-y: visible;
+  }
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 1px 3px rgba(11, 24, 47, 0.06);
+}
+
+.card h2 {
+  margin: 0 0 1rem;
+  font-size: 1.1rem;
+  color: var(--accent);
+}
+
+.muted {
+  color: var(--muted);
+}
+
+/* Buttons */
+.btn {
+  display: inline-block;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 0.6rem 1.1rem;
+  font-size: 0.95rem;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.btn:hover {
+  background: var(--accent-hover);
+}
+
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn-ghost {
+  background: transparent;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+}
+
+.btn-ghost:hover {
+  background: rgba(65, 91, 62, 0.08);
+}
+
+/* Form field */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: 1rem;
+  max-width: 200px;
+}
+
+.field label {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.field input {
+  background: var(--track);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 0.5rem 0.6rem;
+  font-size: 1rem;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+/* Scheduling a one-time run */
+.schedule-field {
+  max-width: 260px;
+  margin-top: 1rem;
+}
+
+.field-hint {
+  font-size: 0.8rem;
+  margin-top: 0.25rem;
+}
+
+.scheduled-line {
+  margin-top: 1rem;
+  color: var(--muted);
+}
+
+.link-inline {
+  color: var(--accent);
+  margin-left: 0.5rem;
+  text-decoration: none;
+}
+
+.link-inline:hover {
+  text-decoration: underline;
+}
+
+/* Bar chart rows */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.5rem 0;
+}
+
+.row .label {
+  width: 160px;
+  flex-shrink: 0;
+}
+
+.row .track {
+  flex: 1;
+  background: var(--track);
+  border-radius: 6px;
+  overflow: hidden;
+  height: 22px;
+}
+
+.row .fill {
+  height: 100%;
+  background: var(--bar);
+  min-width: 2px;
+}
+
+.row .count {
+  width: 48px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* FAQ (drafted) highlighted stat */
+.drafted-stat {
+  border: 1px solid var(--draft-accent);
+  background: rgba(168, 120, 31, 0.1);
+  border-radius: 10px;
+  padding: 0.9rem 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.drafted-stat .stat-value {
+  color: var(--draft-accent);
+  font-size: 1.3rem;
+  font-weight: 700;
+}
+
+.drafted-stat .stat-note {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-top: 0.25rem;
+}
+
+/* Quick links */
+.links {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.link {
+  color: var(--accent);
+  text-decoration: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.9rem;
+}
+
+.link:hover {
+  background: rgba(65, 91, 62, 0.08);
+}
+
+/* Category settings */
+#category-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.category-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.category-input {
+  flex: 1;
+  max-width: 320px;
+  background: var(--track);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 0.5rem 0.6rem;
+  font-size: 1rem;
+}
+
+.category-remove {
+  padding: 0.4rem 0.8rem;
+  font-size: 0.85rem;
+}
+
+.faq-field {
+  max-width: 320px;
+  margin-top: 1rem;
+}
+
+.faq-field select {
+  background: var(--track);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 0.5rem 0.6rem;
+  font-size: 1rem;
+}
+
+/* Semantic search */
+.search-input {
+  flex: 1;
+  min-width: 200px;
+  background: var(--track);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 0.5rem 0.6rem;
+  font-size: 1rem;
+}
+
+.search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.search-result {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  text-decoration: none;
+  color: var(--text);
+}
+
+.search-result:hover {
+  background: rgba(65, 91, 62, 0.08);
+}
+
+.search-subject {
+  font-weight: 600;
+}
+
+.search-sender {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.search-snippet {
+  font-size: 0.85rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hidden {
+  display: none;
+}
+
+/* Schedule ("Run on") field */
+.schedule-field {
+  margin-top: 1rem;
+  max-width: 260px;
+}
+
+.field-hint {
+  font-size: 0.8rem;
+}
+
+.scheduled-line {
+  margin-top: 0.75rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.link-inline {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.link-inline:hover {
+  color: var(--accent-hover);
+}
+
+/* Footer credit */
+.footer-credit {
+  max-width: 680px;
+  margin: 0 auto;
+  padding: 0 1rem 2rem;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.footer-credit .brand-accent {
+  color: var(--accent);
+  font-weight: 600;
+}

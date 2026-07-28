@@ -1,0 +1,161 @@
+"""Entry point: fetch unread emails, classify them, and apply Gmail labels."""
+
+import logging
+import time
+from collections import Counter
+
+from app.auto_reply import create_draft_reply
+from app.classifier import classify_emails
+from app.db import DEFAULT_CATEGORIES, DEFAULT_FAQ_CATEGORY, save_email_embedding
+from app.gmail_client import PROCESSED_LABEL, authenticate, fetch_unread_emails
+from app.labeler import apply_label, get_or_create_label
+from app.search import embed_text
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger("email_triage")
+
+# Result key holding the count of drafted auto-replies (a sub-count, not a
+# separate email). Kept as a fixed string so the dashboard can render it as a
+# distinct stat regardless of which category triggers drafting.
+DRAFTED_KEY = "FAQ (drafted)"
+
+
+def triage(service, max_results=200, categories=None, faq_category=None, user_email=None):
+    """Fetch unread emails, classify and label each, return counts.
+
+    The caller supplies an authenticated Gmail ``service`` object, so the same
+    pipeline can run for whichever user is appropriate (CLI or per-web-user).
+    ``max_results`` caps how many unread emails are fetched per run.
+    ``categories`` is the user's active category list and ``faq_category`` the
+    category that triggers auto-reply drafting. When both are omitted, the
+    built-in defaults are used (and drafting targets the default FAQ category).
+    ``user_email``, when provided, enables storing a semantic embedding per
+    email so it can be searched later.
+    """
+    if categories is None:
+        categories = DEFAULT_CATEGORIES
+        if faq_category is None:
+            faq_category = DEFAULT_FAQ_CATEGORY
+
+    emails = fetch_unread_emails(service, max_results=max_results)
+    logger.info("Fetched %d unread email(s).", len(emails))
+
+    classified = classify_emails(
+        emails, categories=categories, faq_category=faq_category
+    )
+    logger.info("Classified %d email(s).", len(classified))
+
+    counts = Counter()
+    faq_drafted = 0
+
+    for email, category in zip(emails, classified):
+        message_id = email.get("id", "<unknown>")
+
+        try:
+            label_id = get_or_create_label(service, category)
+            apply_label(service, message_id, label_id)
+
+            # Mark as processed so the *next* run's fetch (e.g. the next
+            # 200-email chunk) skips this email instead of refetching it.
+            processed_label_id = get_or_create_label(service, PROCESSED_LABEL)
+            apply_label(service, message_id, processed_label_id)
+        except Exception as exc:  # noqa: BLE001 - keep the batch going
+            logger.error(
+                "Labeling failed for %s (category %s): %s",
+                message_id,
+                category,
+                exc,
+            )
+            continue
+
+        counts[category] += 1
+
+        # Draft a reply for the configured auto-reply category. Draft creation
+        # never raises (returns None on failure), so it cannot stop the batch.
+        if faq_category is not None and category == faq_category:
+            if create_draft_reply(service, email) is not None:
+                faq_drafted += 1
+
+        # Store a semantic embedding so this email is searchable later. This is
+        # best-effort: any failure is logged and skipped so it never breaks
+        # labeling or the rest of the batch.
+        if user_email:
+            try:
+                subject = email.get("subject", "") or ""
+                body = email.get("body", "") or ""
+                vector = embed_text(f"{subject}\n{body[:500]}")
+                save_email_embedding(
+                    user_email,
+                    email.get("id", ""),
+                    email.get("thread_id", ""),
+                    email.get("sender", ""),
+                    subject,
+                    body[:200],
+                    email.get("date", ""),
+                    vector,
+                )
+            except Exception as exc:  # noqa: BLE001 - embedding is best-effort
+                logger.warning(
+                    "Failed to store embedding for %s: %s", message_id, exc
+                )
+
+    result = dict(counts)
+    if faq_category is not None and counts.get(faq_category):
+        # Separate key so the auto-reply category's own count keeps its meaning.
+        result[DRAFTED_KEY] = faq_drafted
+    return result
+
+
+def triage_until_empty(service, chunk_size=200, categories=None, faq_category=None, user_email=None):
+    """Run triage() in chunks until the inbox is caught up; return merged counts.
+
+    Repeatedly processes up to ``chunk_size`` emails per iteration, merging the
+    per-category counts (summing values, including the drafted sub-count). Stops
+    as soon as an iteration's non-drafted counts sum to 0 -- meaning no new
+    unread/unprocessed emails were found. A short pause between iterations
+    avoids hammering the Gmail/Groq APIs back-to-back. ``categories``,
+    ``faq_category`` and ``user_email`` are passed through to triage() unchanged.
+    """
+    merged = Counter()
+
+    while True:
+        counts = triage(
+            service,
+            max_results=chunk_size,
+            categories=categories,
+            faq_category=faq_category,
+            user_email=user_email,
+        )
+
+        # Real emails processed this iteration (the drafted sub-count is not a
+        # separate email, so it does not count toward "caught up").
+        processed = sum(v for k, v in counts.items() if k != DRAFTED_KEY)
+
+        for key, value in counts.items():
+            merged[key] += value
+
+        if processed == 0:
+            break
+
+        time.sleep(2)
+
+    return dict(merged)
+
+
+def print_summary(counts):
+    """Print a per-category count summary."""
+    if not counts:
+        print("No emails were labeled.")
+        return
+
+    summary = ", ".join(
+        f"{category}: {count}" for category, count in sorted(counts.items())
+    )
+    print(summary)
+
+
+if __name__ == "__main__":
+    print_summary(triage(authenticate()))

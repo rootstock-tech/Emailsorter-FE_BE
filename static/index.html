@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Email Triage Assistant · RootStock Technology</title>
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <div id="tree-bg" class="tree-bg" aria-hidden="true"></div>
+
+    <header class="topbar">
+      <div class="brand">
+        <img src="/static/rootstock-logo.jpeg" alt="RootStock Technology" class="brand-logo" />
+        <div>
+          Email Triage <span class="brand-accent">Assistant</span>
+          <span class="brand-sub">RootStock Technology</span>
+        </div>
+      </div>
+      <div id="user-box" class="user-box hidden">
+        <span id="user-email" class="user-email"></span>
+        <button id="signout-btn" class="btn btn-ghost">Sign out</button>
+      </div>
+    </header>
+
+    <main>
+      <!-- Not authenticated -->
+      <section id="auth-card" class="card hidden span-2">
+        <h2>Connect your Gmail</h2>
+        <p class="muted">
+          Connect your Gmail account to classify and label your unread messages.
+        </p>
+        <a class="btn" href="/auth/login">Connect Gmail</a>
+      </section>
+
+      <div class="col">
+        <!-- Authenticated: run triage -->
+        <section id="triage-card" class="card hidden">
+          <h2>Triage</h2>
+          <p class="muted">
+            Processes your whole inbox in chunks of 200 until it's caught up.
+          </p>
+          <div class="actions">
+            <button id="run-btn" class="btn">Run Triage</button>
+            <span id="status" class="muted"></span>
+          </div>
+          <div class="field schedule-field">
+            <label for="run-at">Run on</label>
+            <input id="run-at" type="datetime-local" />
+            <span class="field-hint muted">Leave blank to run now</span>
+          </div>
+          <p id="scheduled-line" class="scheduled-line hidden">
+            <span id="scheduled-text"></span>
+            <a href="#" id="cancel-schedule" class="link-inline">Cancel</a>
+          </p>
+        </section>
+
+        <!-- Authenticated: category settings -->
+        <section id="categories-card" class="card hidden">
+          <h2>Categories</h2>
+          <p class="muted">
+            Customize how your emails are sorted. Rename or remove categories,
+            or add your own.
+          </p>
+          <div id="category-list"></div>
+          <button id="add-category-btn" class="btn btn-ghost">Add category</button>
+          <div class="field faq-field">
+            <label for="faq-select">Auto-reply category</label>
+            <select id="faq-select"></select>
+            <span class="field-hint muted">
+              Drafts polite replies for this category. Choose "None" to disable.
+            </span>
+          </div>
+          <div class="actions">
+            <button id="save-categories-btn" class="btn">Save</button>
+            <span id="categories-status" class="muted"></span>
+          </div>
+        </section>
+      </div>
+
+      <div class="col">
+        <!-- Results -->
+        <section id="results-card" class="card hidden">
+          <h2>Results</h2>
+          <div id="drafted-stat" class="drafted-stat hidden"></div>
+          <div id="results"></div>
+        </section>
+
+        <!-- Semantic search -->
+        <section id="search-card" class="card hidden">
+          <h2>Search</h2>
+          <p class="muted">Find processed emails by meaning, not just keywords.</p>
+          <div class="actions">
+            <input
+              id="search-input"
+              type="text"
+              class="search-input"
+              placeholder="e.g. invoice I still need to pay"
+            />
+            <button id="search-btn" class="btn">Search</button>
+          </div>
+          <div id="search-results" class="search-results"></div>
+        </section>
+
+        <!-- Quick links -->
+        <section id="links-card" class="card hidden">
+          <h2>Quick links</h2>
+          <div class="links">
+            <a
+              id="open-gmail-link"
+              class="link"
+              href="https://mail.google.com/mail/#inbox"
+              target="_blank"
+              rel="noopener"
+              >Open Gmail</a
+            >
+            <a
+              id="open-drafts-link"
+              class="link"
+              href="https://mail.google.com/mail/#drafts"
+              target="_blank"
+              rel="noopener"
+              >Open Drafts</a
+            >
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

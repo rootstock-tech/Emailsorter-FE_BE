@@ -1,0 +1,15 @@
+# Secrets and credentials
+.env
+token.json
+credentials.json
+web_credentials.json
+
+# Local database (stores per-user OAuth tokens)
+app.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
