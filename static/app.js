@@ -7,10 +7,15 @@ const resultsEl = document.getElementById("results");
 const draftedStatEl = document.getElementById("drafted-stat");
 const runBtn = document.getElementById("run-btn");
 const statusEl = document.getElementById("status");
+const triageProgress = document.getElementById("triage-progress");
+const triageProgressFill = document.getElementById("triage-progress-fill");
+const triageProgressLabel = document.getElementById("triage-progress-label");
+const stopTriageBtn = document.getElementById("stop-triage-btn");
 const userBox = document.getElementById("user-box");
 const userEmailEl = document.getElementById("user-email");
 const signoutBtn = document.getElementById("signout-btn");
-const runAtInput = document.getElementById("run-at");
+const runDateInput = document.getElementById("run-date");
+const runTimeInput = document.getElementById("run-time");
 const scheduledLine = document.getElementById("scheduled-line");
 const scheduledTextEl = document.getElementById("scheduled-text");
 const cancelScheduleLink = document.getElementById("cancel-schedule");
@@ -89,6 +94,12 @@ function showAuthenticated(email) {
   linksCard.classList.remove("hidden");
   userBox.classList.remove("hidden");
   userEmailEl.textContent = email || "";
+
+  // Default the date to today (user can change it to a past date for that
+  // day's mail, or a future date + time to schedule).
+  if (!runDateInput.value) {
+    runDateInput.value = todayLocalDate();
+  }
 
   // Point quick links at the specific connected account, not whichever
   // Google account happens to be signed in first in the browser.
@@ -278,13 +289,17 @@ function formatRunAt(iso) {
 function showScheduled(runAtIso) {
   scheduledLine.classList.remove("hidden");
   scheduledTextEl.textContent = `Scheduled for ${formatRunAt(runAtIso)}`;
-  runAtInput.disabled = true;
+  runDateInput.disabled = true;
+  runTimeInput.disabled = true;
 }
 
 function hideScheduled() {
   scheduledLine.classList.add("hidden");
-  runAtInput.disabled = false;
-  runAtInput.value = "";
+  runDateInput.disabled = false;
+  runTimeInput.disabled = false;
+  // IMPORTANT: do NOT clear the inputs here. refreshScheduleState() calls this
+  // on every poll, so clearing would wipe the date/time the user is entering.
+  // Only an explicit Cancel clears the fields.
 }
 
 async function refreshScheduleState() {
@@ -302,16 +317,39 @@ async function refreshScheduleState() {
   }
 }
 
+function todayLocalDate() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 async function onRunClick() {
-  const runAtValue = runAtInput.value;
-  if (runAtValue) {
-    await scheduleRun(runAtValue);
+  const date = runDateInput.value;
+  const time = runTimeInput.value;
+  const today = todayLocalDate();
+
+  if (date && date > today) {
+    // Future date -> schedule a run for later (needs a time).
+    if (!time) {
+      statusEl.textContent = "Please also pick a time for the scheduled run.";
+      return;
+    }
+    const chosen = new Date(`${date}T${time}`);
+    if (Number.isNaN(chosen.getTime()) || chosen.getTime() <= Date.now()) {
+      statusEl.textContent = "Please choose a future date and time.";
+      return;
+    }
+    await scheduleRun(`${date}T${time}`, date);
   } else {
-    await runTriage();
+    // Blank, today, or a past date -> fetch that day's mail now.
+    // Blank defaults to today.
+    await runTriage(date || today);
   }
 }
 
-async function scheduleRun(localDateTimeValue) {
+async function scheduleRun(localDateTimeValue, dateFilter) {
   runBtn.disabled = true;
   statusEl.textContent = "Scheduling…";
 
@@ -320,7 +358,7 @@ async function scheduleRun(localDateTimeValue) {
     const res = await fetch("/api/triage/schedule", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ run_at: runAtIso }),
+      body: JSON.stringify({ run_at: runAtIso, date: dateFilter }),
     });
     if (res.status === 401) {
       showConnect();
@@ -342,24 +380,88 @@ async function scheduleRun(localDateTimeValue) {
 
 async function cancelSchedule(event) {
   event.preventDefault();
+  if (cancelScheduleLink.classList.contains("disabled")) return;
   try {
     await fetch("/api/triage/schedule/cancel", { method: "POST" });
   } catch (err) {
     // Revert the UI regardless of the response.
   }
   hideScheduled();
+  runDateInput.value = "";
+  runTimeInput.value = "";
 }
 
-async function runTriage() {
-  runBtn.disabled = true;
-  statusEl.textContent = "Starting triage…";
+function setSearchEnabled(enabled) {
+  searchInput.disabled = !enabled;
+  searchBtn.disabled = !enabled;
+}
+
+function setBusy(isBusy) {
+  // Disable interactive controls while a run is in progress. Quick links stay
+  // clickable; search is unlocked separately once the first chunk lands.
+  runBtn.disabled = isBusy;
+  runDateInput.disabled = isBusy;
+  runTimeInput.disabled = isBusy;
+  addCategoryBtn.disabled = isBusy;
+  saveCategoriesBtn.disabled = isBusy;
+  faqSelect.disabled = isBusy;
+  categoryListEl.querySelectorAll("input, button").forEach((el) => {
+    el.disabled = isBusy;
+  });
+  cancelScheduleLink.classList.toggle("disabled", isBusy);
+
+  stopTriageBtn.classList.toggle("hidden", !isBusy);
+  stopTriageBtn.disabled = false;
+
+  // Search is locked during a run until the first chunk of emails is embedded.
+  setSearchEnabled(!isBusy);
+}
+
+function showProgressStarting() {
+  triageProgress.classList.remove("hidden");
+  triageProgressFill.style.width = "0%";
+  triageProgressLabel.textContent = "Triage in progress…";
+}
+
+function renderProgress(progress) {
+  const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
+  triageProgress.classList.remove("hidden");
+  triageProgressFill.style.width = `${percent}%`;
+  triageProgressLabel.textContent =
+    percent >= 100 ? "Completed" : `Triage in progress… ${percent}%`;
+}
+
+function hideProgress() {
+  triageProgress.classList.add("hidden");
+}
+
+async function cancelTriage() {
+  stopTriageBtn.disabled = true;
+  statusEl.textContent = "Stopping…";
+  try {
+    await fetch("/api/triage/cancel", { method: "POST" });
+  } catch (err) {
+    // The poll loop will reflect the final (cancelled) state.
+  }
+}
+
+async function runTriage(dateFilter) {
+  setBusy(true);
+  statusEl.textContent = "";
   resultsCard.classList.add("hidden");
+  showProgressStarting();
 
   try {
-    const res = await fetch("/api/triage", { method: "POST" });
+    const options = { method: "POST" };
+    if (dateFilter) {
+      options.headers = { "Content-Type": "application/json" };
+      options.body = JSON.stringify({ date: dateFilter });
+    }
+    const res = await fetch("/api/triage", options);
     if (res.status === 401) {
       showConnect();
       statusEl.textContent = "";
+      hideProgress();
       return;
     }
     if (res.status === 409) {
@@ -370,12 +472,12 @@ async function runTriage() {
     if (!res.ok) {
       throw new Error(`Server responded ${res.status}`);
     }
-    statusEl.textContent = "Running triage… this may take a moment.";
     await pollUntilDone();
   } catch (err) {
     statusEl.textContent = `Triage failed: ${err.message}`;
+    hideProgress();
   } finally {
-    runBtn.disabled = false;
+    setBusy(false);
   }
 }
 
@@ -394,17 +496,29 @@ async function pollUntilDone() {
     }
     const progress = await res.json();
 
+    if (progress.first_chunk_done) {
+      setSearchEnabled(true);
+    }
+
     if (progress.status === "done") {
+      renderProgress({ percent: 100 });
       renderCounts(progress.counts || {});
       statusEl.textContent = "Done.";
       return;
     }
+    if (progress.status === "cancelled") {
+      renderProgress(progress);
+      renderCounts(progress.counts || {});
+      statusEl.textContent = "Triage stopped.";
+      return;
+    }
     if (progress.status === "error") {
       statusEl.textContent = `Triage failed: ${progress.error || "unknown error"}`;
+      hideProgress();
       return;
     }
 
-    statusEl.textContent = "Running triage… this may take a moment.";
+    renderProgress(progress);
   }
 }
 
@@ -427,7 +541,15 @@ async function startWatchLoop() {
       }
       if (res.ok) {
         const progress = await res.json();
-        if (progress.status === "done" && progress.counts) {
+        if (progress.first_chunk_done) {
+          setSearchEnabled(true);
+        }
+        if (progress.status === "running") {
+          renderProgress(progress);
+        } else if (progress.status === "done" && progress.counts) {
+          renderProgress({ percent: 100 });
+          renderCounts(progress.counts);
+        } else if (progress.status === "cancelled" && progress.counts) {
           renderCounts(progress.counts);
         }
       }
@@ -701,6 +823,7 @@ function buildNeuralTree() {
 
 runBtn.addEventListener("click", onRunClick);
 signoutBtn.addEventListener("click", signOut);
+stopTriageBtn.addEventListener("click", cancelTriage);
 cancelScheduleLink.addEventListener("click", cancelSchedule);
 addCategoryBtn.addEventListener("click", addCategory);
 saveCategoriesBtn.addEventListener("click", saveCategories);

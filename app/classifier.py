@@ -126,14 +126,16 @@ def _classify_batch_with_groq(emails, system_prompt, valid_categories):
     return results
 
 
-def classify_emails(emails, categories=None, default_category=None, faq_category=None):
+def classify_emails(emails, categories=None, default_category=None, faq_category=None, progress_cb=None):
     """Classify a list of emails, returning a same-length list of categories.
 
     ``categories`` is the user's active category list (falls back to
     VALID_CATEGORIES). ``default_category`` is used when the LLM fails or returns
     an unrecognized value (falls back to DEFAULT_CATEGORY). ``faq_category`` is
     accepted for a consistent interface with callers but is not needed for
-    classification itself.
+    classification itself. ``progress_cb``, when provided, is called with the
+    cumulative number of emails classified so far (after rules, then after each
+    LLM batch) so a caller can show progress during the classification phase.
 
     Emails resolved by deterministic rules skip the LLM entirely. The rest are
     sent to Groq in batches of BATCH_SIZE. Any batch failure or per-item parse
@@ -158,6 +160,11 @@ def classify_emails(emails, categories=None, default_category=None, faq_category
         else:
             pending_indices.append(i)
 
+    # Rule-classified emails are already done; report that head start.
+    done_count = len(emails) - len(pending_indices)
+    if progress_cb is not None:
+        progress_cb(done_count)
+
     for start in range(0, len(pending_indices), BATCH_SIZE):
         chunk_indices = pending_indices[start : start + BATCH_SIZE]
         chunk_emails = [emails[i] for i in chunk_indices]
@@ -175,6 +182,10 @@ def classify_emails(emails, categories=None, default_category=None, faq_category
 
         for idx, result in zip(chunk_indices, results):
             classified[idx] = result if result is not None else default_category
+
+        done_count += len(chunk_indices)
+        if progress_cb is not None:
+            progress_cb(done_count)
 
         # Small pause between batches to stay comfortably under rate limits.
         if start + BATCH_SIZE < len(pending_indices):

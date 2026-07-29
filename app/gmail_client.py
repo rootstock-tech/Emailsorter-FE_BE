@@ -3,6 +3,7 @@
 import base64
 import json
 import os
+from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 
 from google.auth.transport.requests import Request
@@ -115,17 +116,41 @@ def _parse_date(raw_date):
 PROCESSED_LABEL = "AI-Processed"
 
 
-def fetch_unread_emails(service, max_results=400):
+def _unread_query(date_filter=None):
+    """Build the Gmail search query for inbox mail not yet processed.
+
+    Includes BOTH read and unread inbox mail (only messages already carrying
+    PROCESSED_LABEL are excluded), so every message gets categorized -- not just
+    unread ones. If ``date_filter`` (a "YYYY-MM-DD" string) is given, restrict to
+    emails from that single day.
+    """
+    query = f'in:inbox -label:"{PROCESSED_LABEL}"'
+    if date_filter:
+        try:
+            day = datetime.strptime(date_filter, "%Y-%m-%d").date()
+            nxt = day + timedelta(days=1)
+            query += (
+                f" after:{day.strftime('%Y/%m/%d')}"
+                f" before:{nxt.strftime('%Y/%m/%d')}"
+            )
+        except (TypeError, ValueError):
+            pass  # invalid date -> ignore the filter
+    return query
+
+
+def fetch_unread_emails(service, max_results=400, date_filter=None):
     """Return a list of *not-yet-processed* unread emails as dicts.
 
     "Not yet processed" means unread and not already carrying
     PROCESSED_LABEL, so repeated calls (e.g. one run per chunk of the
     inbox) naturally advance through the inbox instead of refetching the
-    same emails.
+    same emails. When ``date_filter`` ("YYYY-MM-DD") is given, only emails
+    from that day are fetched.
 
     Each dict contains:
     {id, sender, subject, body, date, message_id_header, thread_id}.
     """
+    query = _unread_query(date_filter)
     emails = []
     next_page_token = None
 
@@ -136,7 +161,7 @@ def fetch_unread_emails(service, max_results=400):
             .messages()
             .list(
                 userId="me",
-                q=f'is:unread -label:"{PROCESSED_LABEL}"',
+                q=query,
                 maxResults=min(remaining, 100),
                 pageToken=next_page_token,
             )
@@ -174,3 +199,24 @@ def fetch_unread_emails(service, max_results=400):
             break
 
     return emails
+
+
+def count_unread_unprocessed(service, date_filter=None):
+    """Return Gmail's estimate of how many unread, not-yet-processed emails
+    remain (optionally limited to a single ``date_filter`` day). Used to show a
+    completion percentage during a run. Best-effort -- returns 0 on any error.
+    """
+    try:
+        response = (
+            service.users()
+            .messages()
+            .list(
+                userId="me",
+                q=_unread_query(date_filter),
+                maxResults=1,
+            )
+            .execute()
+        )
+        return int(response.get("resultSizeEstimate", 0) or 0)
+    except Exception:  # noqa: BLE001 - the progress estimate is best-effort
+        return 0

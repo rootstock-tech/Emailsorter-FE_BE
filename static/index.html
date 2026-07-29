@@ -38,16 +38,26 @@
         <section id="triage-card" class="card hidden">
           <h2>Triage</h2>
           <p class="muted">
-            Processes your whole inbox in chunks of 200 until it's caught up.
+            Sort your unread inbox into categories, with optional auto-reply
+            drafts.
           </p>
           <div class="actions">
             <button id="run-btn" class="btn">Run Triage</button>
+            <button id="stop-triage-btn" class="btn btn-ghost hidden">Stop</button>
             <span id="status" class="muted"></span>
           </div>
+          <div id="triage-progress" class="triage-progress hidden">
+            <div class="triage-progress-track">
+              <div id="triage-progress-fill" class="triage-progress-fill"></div>
+            </div>
+            <span id="triage-progress-label" class="triage-progress-label muted"></span>
+          </div>
           <div class="field schedule-field">
-            <label for="run-at">Run on</label>
-            <input id="run-at" type="datetime-local" />
-            <span class="field-hint muted">Leave blank to run now</span>
+            <label for="run-date">Date &amp; time</label>
+            <div class="schedule-inputs">
+              <input id="run-date" type="date" aria-label="Run date" />
+              <input id="run-time" type="time" aria-label="Run time" />
+            </div>
           </div>
           <p id="scheduled-line" class="scheduled-line hidden">
             <span id="scheduled-text"></span>
