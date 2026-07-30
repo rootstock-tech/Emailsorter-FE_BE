@@ -14,6 +14,7 @@ from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
 from google_auth_oauthlib.flow import Flow
 
+from app.config import OAUTH_REDIRECT_URI
 from app.db import save_user_token
 from app.gmail_client import SCOPES
 
@@ -31,8 +32,9 @@ WEB_SCOPES = SCOPES + [
 WEB_CREDENTIALS_FILE = "web_credentials.json"
 
 # Must exactly match an authorized redirect URI configured on the web OAuth
-# client in the Google Cloud console.
-REDIRECT_URI = "http://localhost:8000/auth/callback"
+# client in the Google Cloud console. Configurable (OAUTH_REDIRECT_URI) so the
+# same code runs in production; defaults to the local dev URL.
+REDIRECT_URI = OAUTH_REDIRECT_URI
 
 
 def _build_flow():

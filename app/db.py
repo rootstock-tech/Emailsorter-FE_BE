@@ -1,7 +1,22 @@
-"""Minimal SQLite storage for per-user OAuth tokens.
+"""Per-user SQLite storage for the web app.
 
-Each Gmail account that connects via the web flow gets one row here, keyed by
-email, so multiple users can use the app with isolated tokens.
+Everything is keyed by the connected Gmail address so multiple users stay
+isolated. Three tables:
+
+- ``users``            -- one row per account: the OAuth token JSON used to call
+                          Gmail on the user's behalf.
+- ``user_settings``    -- the user's category list and chosen auto-reply
+                          category.
+- ``email_embeddings`` -- per-email metadata (sender, subject, a short snippet,
+                          date) plus a semantic embedding vector, powering the
+                          "search by meaning" feature.
+
+Security note: the stored OAuth tokens grant access to the user's Gmail, and the
+saved email metadata is personal data. Both are written to ``app.db`` in
+plaintext, so that file is sensitive -- it is gitignored and must never be
+committed or shared, should have restricted filesystem permissions, and for a
+real deployment ought to be encrypted at rest (encrypted volume or
+column-level encryption).
 """
 
 import sqlite3
@@ -20,6 +35,22 @@ DEFAULT_CATEGORIES = [
     "Spam/Newsletter",
 ]
 DEFAULT_FAQ_CATEGORY = "FAQ"
+
+# A category that is always present and cannot be removed by the user: it is the
+# catch-all where emails that do not clearly fit any other category land, which
+# also guarantees the classifier never has to invent a new label.
+FIXED_CATEGORY = "Low Priority"
+
+
+def ensure_fixed_category(categories):
+    """Return ``categories`` guaranteed to contain FIXED_CATEGORY (appended if
+    missing). Comparison is case-insensitive; the canonical name is used."""
+    if not any(
+        isinstance(c, str) and c.strip().lower() == FIXED_CATEGORY.lower()
+        for c in categories
+    ):
+        return list(categories) + [FIXED_CATEGORY]
+    return list(categories)
 
 
 def _connect():
@@ -109,7 +140,8 @@ def save_user_settings(email, categories, faq_category):
     category that triggers auto-reply drafting, or ``None`` for no drafting.
     """
     updated_at = datetime.now(timezone.utc).isoformat()
-    categories_json = json.dumps(categories)
+    # The fixed catch-all category is always kept, even if the caller omits it.
+    categories_json = json.dumps(ensure_fixed_category(categories))
     conn = _connect()
     try:
         conn.execute(
@@ -157,7 +189,10 @@ def get_user_settings(email):
     if not isinstance(categories, list) or not categories:
         categories = list(DEFAULT_CATEGORIES)
 
-    return {"categories": categories, "faq_category": row[1]}
+    return {
+        "categories": ensure_fixed_category(categories),
+        "faq_category": row[1],
+    }
 
 
 def save_email_embedding(

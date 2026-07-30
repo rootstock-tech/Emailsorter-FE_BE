@@ -15,7 +15,12 @@ const userBox = document.getElementById("user-box");
 const userEmailEl = document.getElementById("user-email");
 const signoutBtn = document.getElementById("signout-btn");
 const runDateInput = document.getElementById("run-date");
-const runTimeInput = document.getElementById("run-time");
+const runDateField = document.getElementById("run-date-field");
+const scheduleDateInput = document.getElementById("schedule-date");
+const scheduleHour = document.getElementById("schedule-hour");
+const scheduleMinute = document.getElementById("schedule-minute");
+const scheduleAmpm = document.getElementById("schedule-ampm");
+const scheduleBtn = document.getElementById("schedule-btn");
 const scheduledLine = document.getElementById("scheduled-line");
 const scheduledTextEl = document.getElementById("scheduled-text");
 const cancelScheduleLink = document.getElementById("cancel-schedule");
@@ -35,6 +40,10 @@ const searchResultsEl = document.getElementById("search-results");
 
 const DRAFTED_KEY = "FAQ (drafted)";
 
+// This category is always kept and cannot be removed or renamed in the UI --
+// it is the catch-all for emails that don't fit any other category.
+const FIXED_CATEGORY = "Low Priority";
+
 // The user's working copy of their category list (edited in the Categories
 // card, saved via POST /api/settings/categories).
 let currentCategories = [];
@@ -51,6 +60,10 @@ const CATEGORY_ORDER = [
 // True while a background poll loop (manual run or watching a schedule) is
 // active. Only one loop runs at a time.
 let pollActive = false;
+
+// True while a one-time run is scheduled for later; manual runs are blocked and
+// the Run button is replaced by the scheduled banner.
+let isScheduled = false;
 
 async function init() {
   buildNeuralTree();
@@ -95,11 +108,11 @@ function showAuthenticated(email) {
   userBox.classList.remove("hidden");
   userEmailEl.textContent = email || "";
 
-  // Default the date to today (user can change it to a past date for that
-  // day's mail, or a future date + time to schedule).
-  if (!runDateInput.value) {
-    runDateInput.value = todayLocalDate();
-  }
+  // Populate the schedule time picker and default both date inputs to today.
+  initScheduleControls();
+  const today = todayLocalDate();
+  if (!runDateInput.value) runDateInput.value = today;
+  if (!scheduleDateInput.value) scheduleDateInput.value = today;
 
   // Point quick links at the specific connected account, not whichever
   // Google account happens to be signed in first in the browser.
@@ -149,11 +162,19 @@ async function loadCategories() {
     currentCategories = Array.isArray(data.categories)
       ? data.categories.slice()
       : [];
+    ensureFixedCategory();
     renderCategoryList();
     rebuildFaqSelect(data.faq_category || "");
   } catch (err) {
     // Ignore; the card just stays empty until the user adds categories.
   }
+}
+
+function ensureFixedCategory() {
+  const has = currentCategories.some(
+    (c) => c.trim().toLowerCase() === FIXED_CATEGORY.toLowerCase()
+  );
+  if (!has) currentCategories.push(FIXED_CATEGORY);
 }
 
 function renderCategoryList() {
@@ -163,27 +184,45 @@ function renderCategoryList() {
     const row = document.createElement("div");
     row.className = "category-row";
 
+    const isFixed =
+      cat.trim().toLowerCase() === FIXED_CATEGORY.toLowerCase();
+
     const input = document.createElement("input");
     input.type = "text";
     input.className = "category-input";
     input.value = cat;
-    input.addEventListener("input", () => {
-      currentCategories[index] = input.value;
-      rebuildFaqSelect();
-    });
-
-    const removeBtn = document.createElement("button");
-    removeBtn.type = "button";
-    removeBtn.className = "btn btn-ghost category-remove";
-    removeBtn.textContent = "Remove";
-    removeBtn.addEventListener("click", () => {
-      currentCategories.splice(index, 1);
-      renderCategoryList();
-      rebuildFaqSelect();
-    });
+    if (isFixed) {
+      // Fixed catch-all: can't be renamed or removed.
+      input.readOnly = true;
+      input.title =
+        "Low Priority is always kept as the catch-all category and can't be renamed or removed.";
+    } else {
+      input.addEventListener("input", () => {
+        currentCategories[index] = input.value;
+        rebuildFaqSelect();
+      });
+    }
 
     row.appendChild(input);
-    row.appendChild(removeBtn);
+
+    if (isFixed) {
+      const badge = document.createElement("span");
+      badge.className = "category-fixed muted";
+      badge.textContent = "Always on";
+      row.appendChild(badge);
+    } else {
+      const removeBtn = document.createElement("button");
+      removeBtn.type = "button";
+      removeBtn.className = "btn btn-ghost category-remove";
+      removeBtn.textContent = "Remove";
+      removeBtn.addEventListener("click", () => {
+        currentCategories.splice(index, 1);
+        renderCategoryList();
+        rebuildFaqSelect();
+      });
+      row.appendChild(removeBtn);
+    }
+
     categoryListEl.appendChild(row);
   });
 }
@@ -233,6 +272,11 @@ async function saveCategories() {
     if (value) cleaned.push(value);
   });
 
+  // The fixed catch-all is always saved, even if somehow missing from the UI.
+  if (!cleaned.some((c) => c.toLowerCase() === FIXED_CATEGORY.toLowerCase())) {
+    cleaned.push(FIXED_CATEGORY);
+  }
+
   if (cleaned.length === 0) {
     categoriesStatusEl.textContent = "Add at least one category.";
     return;
@@ -264,6 +308,7 @@ async function saveCategories() {
     currentCategories = Array.isArray(data.categories)
       ? data.categories.slice()
       : cleaned;
+    ensureFixedCategory();
     renderCategoryList();
     rebuildFaqSelect(data.faq_category || "");
     categoriesStatusEl.textContent = "Saved.";
@@ -279,27 +324,52 @@ function sleep(ms) {
 }
 
 function formatRunAt(iso) {
-  try {
-    return new Date(iso).toLocaleString();
-  } catch (err) {
-    return iso;
-  }
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  let hour = d.getHours();
+  const minute = String(d.getMinutes()).padStart(2, "0");
+  const ampm = hour >= 12 ? "PM" : "AM";
+  hour = hour % 12 || 12;
+  const day = d.getDate();
+  const month = d.toLocaleString(undefined, { month: "long" });
+  const year = d.getFullYear();
+  return `${hour}:${minute} ${ampm} on ${day}${ordinalSuffix(day)} ${month} ${year}`;
+}
+
+function ordinalSuffix(n) {
+  const v = n % 100;
+  if (v >= 11 && v <= 13) return "th";
+  return { 1: "st", 2: "nd", 3: "rd" }[n % 10] || "th";
 }
 
 function showScheduled(runAtIso) {
+  isScheduled = true;
   scheduledLine.classList.remove("hidden");
   scheduledTextEl.textContent = `Scheduled for ${formatRunAt(runAtIso)}`;
-  runDateInput.disabled = true;
-  runTimeInput.disabled = true;
+  // A manual run can't be started while one is scheduled: replace the Run
+  // Triage button (and its date) with the scheduled message.
+  runBtn.classList.add("hidden");
+  runDateField.classList.add("hidden");
+  setScheduleInputsDisabled(true);
 }
 
 function hideScheduled() {
+  isScheduled = false;
   scheduledLine.classList.add("hidden");
-  runDateInput.disabled = false;
-  runTimeInput.disabled = false;
+  runBtn.classList.remove("hidden");
+  runDateField.classList.remove("hidden");
+  setScheduleInputsDisabled(false);
   // IMPORTANT: do NOT clear the inputs here. refreshScheduleState() calls this
-  // on every poll, so clearing would wipe the date/time the user is entering.
-  // Only an explicit Cancel clears the fields.
+  // on every poll, so clearing would wipe what the user is entering. Only an
+  // explicit Cancel resets the fields.
+}
+
+function setScheduleInputsDisabled(disabled) {
+  scheduleDateInput.disabled = disabled;
+  scheduleHour.disabled = disabled;
+  scheduleMinute.disabled = disabled;
+  scheduleAmpm.disabled = disabled;
+  scheduleBtn.disabled = disabled;
 }
 
 async function refreshScheduleState() {
@@ -325,32 +395,60 @@ function todayLocalDate() {
   return `${y}-${m}-${day}`;
 }
 
-async function onRunClick() {
-  const date = runDateInput.value;
-  const time = runTimeInput.value;
-  const today = todayLocalDate();
-
-  if (date && date > today) {
-    // Future date -> schedule a run for later (needs a time).
-    if (!time) {
-      statusEl.textContent = "Please also pick a time for the scheduled run.";
-      return;
+function initScheduleControls() {
+  if (scheduleHour.options.length === 0) {
+    for (let h = 1; h <= 12; h++) {
+      const o = document.createElement("option");
+      o.value = String(h);
+      o.textContent = String(h);
+      scheduleHour.appendChild(o);
     }
-    const chosen = new Date(`${date}T${time}`);
-    if (Number.isNaN(chosen.getTime()) || chosen.getTime() <= Date.now()) {
-      statusEl.textContent = "Please choose a future date and time.";
-      return;
+  }
+  if (scheduleMinute.options.length === 0) {
+    for (let m = 0; m < 60; m++) {
+      const o = document.createElement("option");
+      o.value = String(m);
+      o.textContent = String(m).padStart(2, "0");
+      scheduleMinute.appendChild(o);
     }
-    await scheduleRun(`${date}T${time}`, date);
-  } else {
-    // Blank, today, or a past date -> fetch that day's mail now.
-    // Blank defaults to today.
-    await runTriage(date || today);
   }
 }
 
+async function onRunClick() {
+  if (isScheduled) return; // a run is scheduled -> manual run is disabled
+  const today = todayLocalDate();
+  const date = runDateInput.value || today;
+  if (date > today) {
+    statusEl.textContent =
+      'Run date can\u2019t be in the future \u2014 use "Schedule triage" below for later runs.';
+    return;
+  }
+  await runTriage(date);
+}
+
+async function onScheduleClick() {
+  const date = scheduleDateInput.value;
+  if (!date) {
+    statusEl.textContent = "Pick a date to schedule.";
+    return;
+  }
+  const hour12 = parseInt(scheduleHour.value, 10);
+  const minute = parseInt(scheduleMinute.value, 10);
+  let hour24 = hour12 % 12;
+  if (scheduleAmpm.value === "PM") hour24 += 12;
+  const localValue = `${date}T${String(hour24).padStart(2, "0")}:${String(
+    minute
+  ).padStart(2, "0")}`;
+  const chosen = new Date(localValue);
+  if (Number.isNaN(chosen.getTime()) || chosen.getTime() <= Date.now()) {
+    statusEl.textContent = "Please choose a future date and time.";
+    return;
+  }
+  await scheduleRun(localValue, date);
+}
+
 async function scheduleRun(localDateTimeValue, dateFilter) {
-  runBtn.disabled = true;
+  scheduleBtn.disabled = true;
   statusEl.textContent = "Scheduling…";
 
   try {
@@ -374,7 +472,7 @@ async function scheduleRun(localDateTimeValue, dateFilter) {
   } catch (err) {
     statusEl.textContent = `Could not schedule: ${err.message}`;
   } finally {
-    runBtn.disabled = false;
+    scheduleBtn.disabled = false;
   }
 }
 
@@ -387,8 +485,7 @@ async function cancelSchedule(event) {
     // Revert the UI regardless of the response.
   }
   hideScheduled();
-  runDateInput.value = "";
-  runTimeInput.value = "";
+  scheduleDateInput.value = todayLocalDate();
 }
 
 function setSearchEnabled(enabled) {
@@ -401,7 +498,7 @@ function setBusy(isBusy) {
   // clickable; search is unlocked separately once the first chunk lands.
   runBtn.disabled = isBusy;
   runDateInput.disabled = isBusy;
-  runTimeInput.disabled = isBusy;
+  setScheduleInputsDisabled(isBusy);
   addCategoryBtn.disabled = isBusy;
   saveCategoriesBtn.disabled = isBusy;
   faqSelect.disabled = isBusy;
@@ -822,6 +919,7 @@ function buildNeuralTree() {
 }
 
 runBtn.addEventListener("click", onRunClick);
+scheduleBtn.addEventListener("click", onScheduleClick);
 signoutBtn.addEventListener("click", signOut);
 stopTriageBtn.addEventListener("click", cancelTriage);
 cancelScheduleLink.addEventListener("click", cancelSchedule);
@@ -830,5 +928,11 @@ saveCategoriesBtn.addEventListener("click", saveCategories);
 searchBtn.addEventListener("click", runSearch);
 searchInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") runSearch();
+});
+searchInput.addEventListener("input", () => {
+  // Clearing the query should clear the results too.
+  if (searchInput.value.trim() === "") {
+    searchResultsEl.innerHTML = "";
+  }
 });
 init();

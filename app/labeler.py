@@ -1,21 +1,25 @@
 """Gmail label helpers: look up, create, and apply labels."""
 
-# Cache of label name -> label id to avoid repeat labels().list() API calls
-# within a single run.
+# Cache of (account_key, label name) -> label id to avoid repeat labels().list()
+# API calls. Keyed by account so label ids from one Gmail account are never
+# reused for another (label ids are per-account; reusing them across users made
+# apply_label fail and emails go unlabeled).
 _label_cache = {}
 
 
-def get_or_create_label(service, label_name, hidden=False):
+def get_or_create_label(service, label_name, hidden=False, account_key=None):
     """Return the label id for ``label_name``, creating the label if needed.
 
-    Results are cached in a module-level dict so repeated calls for the same
-    label name within a run do not hit the Gmail API again. When ``hidden`` is
-    True the label is kept internal -- not shown in Gmail's label list or on
-    messages (used for the bookkeeping "AI-Processed" label). An existing label
-    that was created visible is patched to hidden.
+    Results are cached in a module-level dict keyed by ``(account_key,
+    label_name)`` so repeated calls for the same label within a run do not hit
+    the Gmail API again, while different Gmail accounts never share ids. When
+    ``hidden`` is True the label is kept internal -- not shown in Gmail's label
+    list or on messages (used for the bookkeeping "AI-Processed" label). An
+    existing label that was created visible is patched to hidden.
     """
-    if label_name in _label_cache:
-        return _label_cache[label_name]
+    cache_key = (account_key, label_name)
+    if cache_key in _label_cache:
+        return _label_cache[cache_key]
 
     list_visibility = "labelHide" if hidden else "labelShow"
     message_visibility = "hide" if hidden else "show"
@@ -40,7 +44,7 @@ def get_or_create_label(service, label_name, hidden=False):
                     ).execute()
                 except Exception:  # noqa: BLE001 - visibility tweak is best-effort
                     pass
-            _label_cache[label_name] = label_id
+            _label_cache[cache_key] = label_id
             return label_id
 
     created = (
@@ -56,7 +60,7 @@ def get_or_create_label(service, label_name, hidden=False):
         )
         .execute()
     )
-    _label_cache[label_name] = created["id"]
+    _label_cache[cache_key] = created["id"]
     return created["id"]
 
 

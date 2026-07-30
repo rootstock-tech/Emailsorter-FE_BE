@@ -22,9 +22,24 @@ Routes:
 
 Every /api route requires an authenticated session; unauthenticated requests
 receive 401.
+
+Security model:
+- Authentication is Google OAuth2 (PKCE web flow) requesting the gmail.modify
+  scope. The PKCE code_verifier is kept in the session, never exposed to the
+  client, and consumed once at /auth/callback.
+- The logged-in identity lives in a signed session cookie (SessionMiddleware).
+  The signing key comes from SESSION_SECRET; if unset, a random per-process key
+  is generated (no predictable hardcoded fallback). Cookies are same_site=lax
+  (CSRF mitigation) and https_only in production (SESSION_HTTPS_ONLY).
+- Per-user OAuth tokens are stored in SQLite (see app/db.py) and are sensitive;
+  app.db is gitignored and must be access-restricted / encrypted at rest.
+- Every /api route resolves the user from the session and returns 401 when
+  absent, so one user can never act on another's mailbox. Request bodies
+  (categories, dates) are validated before use.
 """
 
 import logging
+import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -36,7 +51,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from app.config import SESSION_SECRET
+from app.config import SESSION_HTTPS_ONLY, SESSION_SECRET
 from app.db import (
     get_user_settings,
     get_user_token,
@@ -75,13 +90,25 @@ app = FastAPI(title="Email Triage Assistant", lifespan=lifespan)
 
 _session_secret = SESSION_SECRET
 if not _session_secret:
+    # No hardcoded fallback: a predictable secret would let anyone forge signed
+    # session cookies and impersonate a user. Generate a random per-process
+    # secret instead. Sessions won't survive a restart (users simply re-login),
+    # which is acceptable for development.
     logger.warning(
-        "SESSION_SECRET is not set; using an insecure development default. "
-        "Set SESSION_SECRET in your .env before deploying."
+        "SESSION_SECRET is not set; generating a temporary random secret. "
+        "Sessions will reset on restart -- set SESSION_SECRET in your .env for "
+        "stable, secure sessions before deploying."
     )
-    _session_secret = "insecure-dev-session-secret"
+    _session_secret = secrets.token_hex(32)
 
-app.add_middleware(SessionMiddleware, secret_key=_session_secret)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=_session_secret,
+    # Not sent on cross-site requests -> basic CSRF mitigation.
+    same_site="lax",
+    # Only sent over HTTPS in production (off by default for local http dev).
+    https_only=SESSION_HTTPS_ONLY,
+)
 
 # Per-user triage progress, keyed by email. Each value is a dict shaped like:
 # {"status": "idle"|"running"|"done"|"error", "counts": None|dict, "error": None|str}
@@ -281,9 +308,13 @@ def _run_triage(email, service, date_filter=None):
                 percent=100,
                 first_chunk_done=True,
             )
-    except Exception as exc:  # noqa: BLE001 - surface failure via status endpoint
+    except Exception:  # noqa: BLE001 - surface failure via status endpoint
         logger.exception("Background triage run failed for %s.", email)
-        progress.update(status="error", counts=None, error=str(exc))
+        progress.update(
+            status="error",
+            counts=None,
+            error="Triage failed due to an internal error. Please try again.",
+        )
     finally:
         _cancel_by_user.pop(email, None)
 

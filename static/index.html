@@ -41,28 +41,43 @@
             Sort your unread inbox into categories, with optional auto-reply
             drafts.
           </p>
-          <div class="actions">
+          <div class="actions run-row">
             <button id="run-btn" class="btn">Run Triage</button>
+            <div class="field inline-field" id="run-date-field">
+              <label for="run-date">For date</label>
+              <input id="run-date" type="date" aria-label="Run date" />
+            </div>
             <button id="stop-triage-btn" class="btn btn-ghost hidden">Stop</button>
             <span id="status" class="muted"></span>
           </div>
+          <p id="scheduled-line" class="scheduled-line hidden">
+            <span id="scheduled-text"></span>
+            <a href="#" id="cancel-schedule" class="link-inline">Cancel</a>
+          </p>
           <div id="triage-progress" class="triage-progress hidden">
             <div class="triage-progress-track">
               <div id="triage-progress-fill" class="triage-progress-fill"></div>
             </div>
             <span id="triage-progress-label" class="triage-progress-label muted"></span>
           </div>
-          <div class="field schedule-field">
-            <label for="run-date">Date &amp; time</label>
+
+          <div class="schedule-block">
+            <h3 class="sub-heading">Schedule triage</h3>
+            <p class="field-hint muted">Run automatically at a future date and time.</p>
             <div class="schedule-inputs">
-              <input id="run-date" type="date" aria-label="Run date" />
-              <input id="run-time" type="time" aria-label="Run time" />
+              <input id="schedule-date" type="date" aria-label="Schedule date" />
+              <div class="time-picker">
+                <select id="schedule-hour" aria-label="Hour"></select>
+                <span class="time-colon">:</span>
+                <select id="schedule-minute" aria-label="Minute"></select>
+                <select id="schedule-ampm" aria-label="AM or PM">
+                  <option value="AM">AM</option>
+                  <option value="PM">PM</option>
+                </select>
+              </div>
+              <button id="schedule-btn" class="btn btn-ghost">Schedule</button>
             </div>
           </div>
-          <p id="scheduled-line" class="scheduled-line hidden">
-            <span id="scheduled-text"></span>
-            <a href="#" id="cancel-schedule" class="link-inline">Cancel</a>
-          </p>
         </section>
 
         <!-- Authenticated: category settings -->

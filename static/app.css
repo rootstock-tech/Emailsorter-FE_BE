@@ -38,7 +38,7 @@ body {
   inset: 0;
   z-index: 0;
   pointer-events: none;
-  opacity: 0.08;
+  opacity: 0.2;
 }
 
 .tree-bg svg {
@@ -299,21 +299,80 @@ select:disabled {
   cursor: not-allowed;
 }
 
+/* Run row: Run button + a compact inline date field. */
+.run-row {
+  gap: 1rem;
+}
+
+.inline-field {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0;
+  max-width: none;
+}
+
+.inline-field label {
+  white-space: nowrap;
+}
+
+.inline-field input {
+  background: var(--track);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 0.45rem 0.55rem;
+  font-size: 0.95rem;
+}
+
 /* Scheduling a one-time run */
-.schedule-field {
-  max-width: 340px;
-  margin-top: 1rem;
+.schedule-block {
+  margin-top: 1.4rem;
+  padding-top: 1.1rem;
+  border-top: 1px solid var(--border);
+}
+
+.sub-heading {
+  margin: 0 0 0.25rem;
+  font-size: 0.95rem;
+  color: var(--text);
 }
 
 .schedule-inputs {
   display: flex;
+  align-items: center;
   gap: 0.5rem;
   flex-wrap: wrap;
+  margin-top: 0.6rem;
 }
 
-.schedule-inputs input {
-  flex: 1;
-  min-width: 130px;
+.schedule-inputs input[type="date"] {
+  background: var(--track);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 0.45rem 0.55rem;
+  font-size: 0.95rem;
+}
+
+.time-picker {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.time-picker select {
+  background: var(--track);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 0.45rem 0.4rem;
+  font-size: 0.95rem;
+}
+
+.time-colon {
+  color: var(--muted);
+  font-weight: 700;
 }
 
 .field-hint {
@@ -437,6 +496,20 @@ select:disabled {
 .category-remove {
   padding: 0.4rem 0.8rem;
   font-size: 0.85rem;
+}
+
+/* "Always on" badge for the fixed catch-all category */
+.category-fixed {
+  font-size: 0.8rem;
+  padding: 0.3rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  white-space: nowrap;
+}
+
+.category-input:read-only {
+  opacity: 0.75;
+  cursor: not-allowed;
 }
 
 .faq-field {

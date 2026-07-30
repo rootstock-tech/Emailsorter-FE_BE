@@ -115,6 +115,10 @@ def _parse_date(raw_date):
 # repeatedly) never reprocesses the same batch twice.
 PROCESSED_LABEL = "AI-Processed"
 
+# When a date is chosen (or defaulted to today), fetch that day plus this many
+# previous days -- not just the single selected day.
+FETCH_WINDOW_DAYS = 10
+
 
 def _unread_query(date_filter=None):
     """Build the Gmail search query for inbox mail not yet processed.
@@ -122,15 +126,17 @@ def _unread_query(date_filter=None):
     Includes BOTH read and unread inbox mail (only messages already carrying
     PROCESSED_LABEL are excluded), so every message gets categorized -- not just
     unread ones. If ``date_filter`` (a "YYYY-MM-DD" string) is given, restrict to
-    emails from that single day.
+    a window ending on that day and reaching back ``FETCH_WINDOW_DAYS`` days
+    (i.e. the selected date and the previous 10 days).
     """
     query = f'in:inbox -label:"{PROCESSED_LABEL}"'
     if date_filter:
         try:
             day = datetime.strptime(date_filter, "%Y-%m-%d").date()
+            start = day - timedelta(days=FETCH_WINDOW_DAYS)
             nxt = day + timedelta(days=1)
             query += (
-                f" after:{day.strftime('%Y/%m/%d')}"
+                f" after:{start.strftime('%Y/%m/%d')}"
                 f" before:{nxt.strftime('%Y/%m/%d')}"
             )
         except (TypeError, ValueError):

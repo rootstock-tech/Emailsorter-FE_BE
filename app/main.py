@@ -17,6 +17,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("email_triage")
 
+
+def _account_email(service):
+    """Best-effort Gmail address for the connected account (used as a cache key
+    so label ids are never shared across accounts). Returns None on failure."""
+    try:
+        return service.users().getProfile(userId="me").execute().get("emailAddress")
+    except Exception:  # noqa: BLE001 - falling back to None is fine
+        return None
+
 # Result key holding the count of drafted auto-replies (a sub-count, not a
 # separate email). Kept as a fixed string so the dashboard can render it as a
 # distinct stat regardless of which category triggers drafting.
@@ -51,6 +60,11 @@ def triage(service, max_results=200, categories=None, faq_category=None, user_em
     logger.info("Fetched %d unread email(s).", len(emails))
     fetched = len(emails)
 
+    # Bail out before the (slow) classification if a stop was already requested.
+    if should_cancel is not None and should_cancel():
+        logger.info("Triage cancelled before classification.")
+        return {}
+
     # Classification is the first half of each email's work unit.
     def _on_classified(n_classified):
         if progress_cb is not None:
@@ -61,12 +75,34 @@ def triage(service, max_results=200, categories=None, faq_category=None, user_em
         categories=categories,
         faq_category=faq_category,
         progress_cb=_on_classified,
+        should_cancel=should_cancel,
     )
     logger.info("Classified %d email(s).", len(classified))
 
     counts = Counter()
     faq_drafted = 0
     processed_in_chunk = 0
+
+    # Resolve the account once (used as the label-cache key) and pre-create a
+    # label for every configured category, so all of the user's categories --
+    # including newly added ones -- show up in Gmail even before an email is
+    # sorted into them.
+    account_key = user_email or _account_email(service)
+    category_label_ids = {}
+    for category_name in categories:
+        try:
+            category_label_ids[category_name] = get_or_create_label(
+                service, category_name, account_key=account_key
+            )
+        except Exception as exc:  # noqa: BLE001 - one label failure must not stop the run
+            logger.error("Could not pre-create label %r: %s", category_name, exc)
+    try:
+        processed_label_id = get_or_create_label(
+            service, PROCESSED_LABEL, hidden=True, account_key=account_key
+        )
+    except Exception as exc:  # noqa: BLE001 - keep going without the internal label
+        logger.error("Could not create the %s label: %s", PROCESSED_LABEL, exc)
+        processed_label_id = None
 
     for email, category in zip(emails, classified):
         if should_cancel is not None and should_cancel():
@@ -79,15 +115,20 @@ def triage(service, max_results=200, categories=None, faq_category=None, user_em
         message_id = email.get("id", "<unknown>")
 
         try:
-            label_id = get_or_create_label(service, category)
+            label_id = category_label_ids.get(category)
+            if label_id is None:
+                # A category produced by classification that was not in the
+                # configured list (e.g. the default fallback) -- create it now.
+                label_id = get_or_create_label(
+                    service, category, account_key=account_key
+                )
+                category_label_ids[category] = label_id
             apply_label(service, message_id, label_id)
 
             # Mark as processed (with an internal, hidden label) so the *next*
             # fetch skips this email instead of re-processing it.
-            processed_label_id = get_or_create_label(
-                service, PROCESSED_LABEL, hidden=True
-            )
-            apply_label(service, message_id, processed_label_id)
+            if processed_label_id is not None:
+                apply_label(service, message_id, processed_label_id)
         except Exception as exc:  # noqa: BLE001 - keep the batch going
             logger.error(
                 "Labeling failed for %s (category %s): %s",

@@ -124,18 +124,13 @@ def create_draft_reply(service, email):
         message["To"] = email.get("sender", "")
         message["Subject"] = _reply_subject(email.get("subject", ""))
 
-        # Thread the reply to the original message so it appears in-conversation.
-        original_message_id = email.get("message_id_header", "")
-        if original_message_id:
-            message["In-Reply-To"] = original_message_id
-            message["References"] = original_message_id
-
+        # Deliberately NOT threaded into the original conversation: a threaded
+        # draft inherits the original email's labels, so FAQ drafts would show
+        # up under the "FAQ" label. Keeping the draft standalone means it lives
+        # only in Drafts, and the category label shows just the real inbox mail.
         raw = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
 
         draft_message = {"raw": raw}
-        thread_id = email.get("thread_id")
-        if thread_id:
-            draft_message["threadId"] = thread_id
 
         return (
             service.users()

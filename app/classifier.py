@@ -41,18 +41,101 @@ GROQ_MODEL = "llama-3.3-70b-versatile"
 # How many emails to classify per Groq call.
 BATCH_SIZE = 10
 
+# Name fragments that mark a category as a good "catch-all" for emails that do
+# not clearly fit anywhere else (used to pick a safe fallback that is always one
+# of the user's own categories -- so we never invent an extra label).
+_CATCHALL_HINTS = (
+    "low",
+    "other",
+    "misc",
+    "general",
+    "spam",
+    "newsletter",
+    "promo",
+    "update",
+)
+
+
+def _pick_default_category(categories):
+    """Choose a fallback category from the user's own list.
+
+    Prefers a low-priority / catch-all category if the user has one, else falls
+    back to the last configured category. Never returns a name outside
+    ``categories``, so an unmatched email can never create a brand-new label.
+    """
+    if not categories:
+        return DEFAULT_CATEGORY
+    for category in categories:
+        if any(hint in category.lower() for hint in _CATCHALL_HINTS):
+            return category
+    return categories[-1]
+
+
+# Short guidance for the built-in category names so the model classifies by
+# real intent instead of guessing from the label. Custom categories fall back
+# to their plain name.
+_CATEGORY_HINTS = {
+    "Needs Action": (
+        "the recipient personally must reply or do something -- a direct "
+        "question or request addressed to them, a task, or a bill/invoice that "
+        "needs paying or responding to"
+    ),
+    "FAQ": (
+        "a routine, common question that could be answered with a standard "
+        "reply (typical support/customer questions)"
+    ),
+    "Red Flag": (
+        "urgent or serious matters -- complaints, legal notices, security or "
+        "fraud alerts, account problems, threats, or escalations"
+    ),
+    "Low Priority": (
+        "informational only, no action needed -- receipts, order/payment "
+        "confirmations, OTP/verification codes, automated notifications, FYI "
+        "updates"
+    ),
+    "Spam/Newsletter": (
+        "marketing, promotions, sales, newsletters, or bulk automated mail the "
+        "recipient did not personally solicit"
+    ),
+}
+
 
 def _build_system_prompt(categories):
-    """Build the classifier system prompt from a user's category list."""
-    category_list = ", ".join(categories)
+    """Build the classifier system prompt from a user's category list.
+
+    Includes a short description of each recognized category so the model
+    classifies by real intent rather than guessing from the label name.
+    """
+    lines = []
+    for category in categories:
+        hint = _CATEGORY_HINTS.get(category)
+        lines.append(f"- {category}: {hint}" if hint else f"- {category}")
+    guidance = "\n".join(lines)
     example = list(categories)[:3] or list(categories)
+
     return (
-        "You are an email triage assistant. You will be given a numbered list "
-        "of emails. Classify each one into exactly one of these categories: "
-        f"{category_list}. "
-        "Respond with only a JSON array of strings, one category per email, in "
-        "the same order, and nothing else. Example for "
-        f"{len(example)} emails: {json.dumps(example)}"
+        "You are an expert email triage assistant. Classify each email into "
+        "exactly ONE of these categories, picking the single best fit based on "
+        "the email's real intent and whether the recipient must act:\n"
+        f"{guidance}\n\n"
+        "Rules of thumb:\n"
+        "- Classify by the email's real PURPOSE, not just topic keywords. A "
+        "promotional email about courses, jobs, products or events is marketing "
+        "-- put it in the newsletter/promotions category, not a topic category "
+        "it merely mentions (e.g. an ad for online courses is NOT 'educational').\n"
+        "- Marketing, promotions, sales, job alerts, social/network "
+        "notifications and newsletters are NEVER an action or urgent category, "
+        "even if they say 'urgent' or 'act now'.\n"
+        "- Automated receipts, confirmations and verification codes are "
+        "informational, not action items.\n"
+        "- Only choose an action or urgent category when a real human genuinely "
+        "needs to respond or do something personally addressed to them.\n"
+        "- Assign a category ONLY when the email genuinely belongs there. If it "
+        "does not clearly fit any specific category, choose the most general or "
+        "low-priority one instead of forcing a wrong label.\n\n"
+        "You will get a numbered list of emails. Respond with ONLY a JSON array "
+        "of category strings -- one per email, in the same order, no extra "
+        f"text. Example for {len(example)} emails: {json.dumps(example)}"
     )
 
 # Lazily-created singleton client so we don't build one per email.
@@ -126,7 +209,7 @@ def _classify_batch_with_groq(emails, system_prompt, valid_categories):
     return results
 
 
-def classify_emails(emails, categories=None, default_category=None, faq_category=None, progress_cb=None):
+def classify_emails(emails, categories=None, default_category=None, faq_category=None, progress_cb=None, should_cancel=None):
     """Classify a list of emails, returning a same-length list of categories.
 
     ``categories`` is the user's active category list (falls back to
@@ -144,8 +227,10 @@ def classify_emails(emails, categories=None, default_category=None, faq_category
     """
     if categories is None:
         categories = list(VALID_CATEGORIES)
-    if default_category is None:
-        default_category = DEFAULT_CATEGORY
+    if default_category is None or default_category not in categories:
+        # Always fall back to one of the user's own categories so an unmatched
+        # or failed email never spawns an extra label they did not configure.
+        default_category = _pick_default_category(categories)
 
     valid_categories = set(categories)
     system_prompt = _build_system_prompt(categories)
@@ -166,16 +251,35 @@ def classify_emails(emails, categories=None, default_category=None, faq_category
         progress_cb(done_count)
 
     for start in range(0, len(pending_indices), BATCH_SIZE):
+        # Stop classifying as soon as a cancel is requested -- this is the slow
+        # phase, so checking here makes Stop take effect within a batch instead
+        # of after the whole chunk is classified.
+        if should_cancel is not None and should_cancel():
+            logger.info("Classification cancelled after %d email(s).", done_count)
+            break
+
         chunk_indices = pending_indices[start : start + BATCH_SIZE]
         chunk_emails = [emails[i] for i in chunk_indices]
 
-        try:
-            results = _classify_batch_with_groq(
-                chunk_emails, system_prompt, valid_categories
-            )
-        except Exception as exc:  # noqa: BLE001 - never let one batch break the run
-            logger.warning("Groq batch classification failed: %s", exc)
-            results = None
+        # One retry: a transient failure (rate limit / bad JSON) should not
+        # silently dump a whole batch into the default category.
+        results = None
+        for attempt in range(2):
+            try:
+                results = _classify_batch_with_groq(
+                    chunk_emails, system_prompt, valid_categories
+                )
+            except Exception as exc:  # noqa: BLE001 - never let one batch break the run
+                logger.warning(
+                    "Groq batch classification failed (attempt %d): %s",
+                    attempt + 1,
+                    exc,
+                )
+                results = None
+            if results is not None:
+                break
+            if attempt == 0:
+                time.sleep(2)  # brief backoff before the single retry
 
         if results is None:
             results = [None] * len(chunk_emails)
