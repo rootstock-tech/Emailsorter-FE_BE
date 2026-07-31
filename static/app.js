@@ -859,12 +859,14 @@ function buildNeuralTree() {
     }
   }
 
-  // Start near bottom-center of the 1440x900 viewBox, growing upward.
-  generateBranch(720, 900, 100, 180, 6, 0);
+  // Start lower-left of center and lean to the upper-right so the canopy fans
+  // toward the top-right corner, matching the RootStock site layout (tree offset
+  // to the side rather than dead center, where the dashboard would cover it).
+  generateBranch(780, 920, 60, 195, 6, 0);
 
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", "0 0 1440 900");
-  svg.setAttribute("preserveAspectRatio", "xMidYMax slice");
+  svg.setAttribute("preserveAspectRatio", "xMaxYMax slice");
   svg.setAttribute("class", "tree-bg-svg");
 
   const drawIns = [];
