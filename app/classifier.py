@@ -23,7 +23,7 @@ VALID_CATEGORIES = {
     "Needs Action",
     "FAQ",
     "Red Flag",
-    "Low Priority",
+    "Others",
     "Spam/Newsletter",
 }
 
@@ -76,28 +76,42 @@ def _pick_default_category(categories):
 # to their plain name.
 _CATEGORY_HINTS = {
     "Needs Action": (
-        "the recipient personally must reply or do something -- a direct "
-        "question or request addressed to them, a task, or a bill/invoice that "
-        "needs paying or responding to"
+        "Mail where you personally have to reply or do something, like a direct "
+        "question, a request, a task to complete, or a bill you need to pay."
     ),
     "FAQ": (
-        "a routine, common question that could be answered with a standard "
-        "reply (typical support/customer questions)"
+        "A common, everyday question that you can answer with a standard reply, "
+        "the kind of thing that gets asked again and again."
     ),
     "Red Flag": (
-        "urgent or serious matters -- complaints, legal notices, security or "
-        "fraud alerts, account problems, threats, or escalations"
+        "Urgent or serious mail such as complaints, legal notices, security or "
+        "fraud alerts, account problems, or anything that needs escalating."
     ),
-    "Low Priority": (
-        "informational only, no action needed -- receipts, order/payment "
-        "confirmations, OTP/verification codes, automated notifications, FYI "
-        "updates"
+    "Others": (
+        "Everything that does not clearly belong anywhere else, like receipts, "
+        "order and payment confirmations, verification codes, and routine "
+        "notifications you only need to be aware of."
     ),
     "Spam/Newsletter": (
-        "marketing, promotions, sales, newsletters, or bulk automated mail the "
-        "recipient did not personally solicit"
+        "Marketing, promotions, sales, newsletters, and bulk mail that you never "
+        "personally asked for."
     ),
 }
+
+# Plain-language summary of how a label is chosen, shown in the app's label guide.
+CLASSIFICATION_SUMMARY = (
+    "We start with a simple check: mail from marketing and newsletter addresses "
+    "goes straight to Spam/Newsletter. Everything else is read by an AI model "
+    "that decides the category from what the email is really about, not just the "
+    "words in it. If a mail does not clearly fit anywhere, it goes to Others. We "
+    "also add a hidden AI-Processed label to mail we have already handled so the "
+    "same message is never sorted twice."
+)
+
+
+def category_definitions():
+    """Return a copy of the human-readable definition for each known category."""
+    return dict(_CATEGORY_HINTS)
 
 
 def _build_system_prompt(categories):

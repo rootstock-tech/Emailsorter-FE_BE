@@ -55,10 +55,16 @@ from app.config import SESSION_HTTPS_ONLY, SESSION_SECRET
 from app.db import (
     get_user_settings,
     get_user_token,
+    has_embeddings,
     init_db,
     save_user_settings,
 )
-from app.gmail_client import authenticate_from_token_json, count_unread_unprocessed
+from app.classifier import CLASSIFICATION_SUMMARY, category_definitions
+from app.gmail_client import (
+    RANGE_DAYS,
+    authenticate_from_token_json,
+    count_unread_unprocessed,
+)
 from app.main import triage_until_empty
 from app.search import search_emails
 from app.web_auth import exchange_code, login_url
@@ -160,18 +166,20 @@ def _parse_future_datetime(value):
     return parsed
 
 
-async def _read_date_filter(request):
-    """Read an optional {"date": "YYYY-MM-DD"} filter from the request body."""
+async def _read_run_opts(request):
+    """Read the sort range ("1d"/"1w") and optional anchor date from the body."""
     try:
         body = await request.json()
-    except Exception:  # noqa: BLE001 - no/invalid body just means no filter
-        return None
+    except Exception:  # noqa: BLE001 - no/invalid body just means defaults
+        body = {}
     if not isinstance(body, dict):
-        return None
+        body = {}
+    sort_range = body.get("range")
+    if sort_range not in RANGE_DAYS:
+        sort_range = "1d"
     date = body.get("date")
-    if isinstance(date, str) and date.strip():
-        return date.strip()
-    return None
+    date = date.strip() if isinstance(date, str) and date.strip() else None
+    return sort_range, date
 
 
 def current_user_email(request):
@@ -199,28 +207,42 @@ def auth_login(request: Request):
     session so /auth/callback can retrieve it -- it cannot be recovered from
     the auth code alone.
     """
-    auth_url, code_verifier = login_url()
+    auth_url, state, code_verifier = login_url()
+    request.session["oauth_state"] = state
     request.session["oauth_code_verifier"] = code_verifier
     return RedirectResponse(auth_url)
 
 
 @app.get("/auth/callback")
 def auth_callback(request: Request):
-    """Handle the OAuth redirect: exchange the code, store the user, go home."""
+    """Handle the OAuth redirect: exchange the code, store the user, go home.
+
+    Any failure (user denied, expired/duplicate login attempt, PKCE mismatch)
+    redirects back to the dashboard with an error flag instead of returning a
+    500, so the user can simply try connecting again.
+    """
+    if request.query_params.get("error"):
+        return RedirectResponse("/?auth_error=1")
+
     code = request.query_params.get("code")
-    if not code:
-        return JSONResponse(
-            {"error": "Missing authorization code."}, status_code=400
-        )
-
+    returned_state = request.query_params.get("state")
+    expected_state = request.session.pop("oauth_state", None)
     code_verifier = request.session.pop("oauth_code_verifier", None)
-    if not code_verifier:
-        return JSONResponse(
-            {"error": "Missing or expired login session. Please try connecting again."},
-            status_code=400,
-        )
 
-    email = exchange_code(code, code_verifier)
+    if not code or not code_verifier:
+        return RedirectResponse("/?auth_error=1")
+
+    # A newer login attempt replaced this one's verifier -> the codes won't
+    # match. Ask the user to retry cleanly rather than failing cryptically.
+    if expected_state and returned_state and expected_state != returned_state:
+        return RedirectResponse("/?auth_error=1")
+
+    try:
+        email = exchange_code(code, code_verifier)
+    except Exception:  # noqa: BLE001 - surface as a friendly retry, not a 500
+        logger.exception("OAuth token exchange failed.")
+        return RedirectResponse("/?auth_error=1")
+
     request.session["user_email"] = email
     return RedirectResponse("/")
 
@@ -242,7 +264,7 @@ async def api_triage(request: Request, background_tasks: BackgroundTasks):
     if service is None:
         return _unauthenticated()
 
-    date_filter = await _read_date_filter(request)
+    sort_range, date = await _read_run_opts(request)
 
     progress = _progress_by_user.setdefault(email, _default_progress())
     if progress["status"] == "running":
@@ -252,15 +274,15 @@ async def api_triage(request: Request, background_tasks: BackgroundTasks):
         )
 
     progress.update(status="running", counts=None, error=None, percent=0, first_chunk_done=False)
-    background_tasks.add_task(_run_triage, email, service, date_filter)
+    background_tasks.add_task(_run_triage, email, service, sort_range, date)
     return JSONResponse({"status": "started"})
 
 
-def _run_triage(email, service, date_filter=None):
+def _run_triage(email, service, sort_range="1d", date=None):
     """Run the full chained triage for one user and record the outcome."""
     progress = _progress_by_user.setdefault(email, _default_progress())
     _cancel_by_user[email] = False
-    total = count_unread_unprocessed(service, date_filter)
+    total = count_unread_unprocessed(service, sort_range, date)
     progress.update(
         status="running",
         counts=None,
@@ -296,7 +318,8 @@ def _run_triage(email, service, date_filter=None):
             progress_cb=report,
             should_cancel=should_cancel,
             on_chunk_done=on_chunk_done,
-            date_filter=date_filter,
+            sort_range=sort_range,
+            date=date,
         )
         if _cancel_by_user.get(email, False):
             progress.update(status="cancelled", counts=counts, error=None)
@@ -319,11 +342,11 @@ def _run_triage(email, service, date_filter=None):
         _cancel_by_user.pop(email, None)
 
 
-def _run_scheduled_triage(email, date_filter=None):
+def _run_scheduled_triage(email, sort_range="1d"):
     """APScheduler entry point for a one-time scheduled run.
 
     Re-fetches the user's Gmail service (the token may need refreshing) and runs
-    the same triage as a manual run, optionally restricted to ``date_filter``.
+    the same triage as a manual run, for the given ``sort_range``.
     """
     # The job is firing now; clear the pending-schedule record.
     _scheduled_runs_by_user.pop(email, None)
@@ -342,7 +365,7 @@ def _run_scheduled_triage(email, date_filter=None):
         )
         return
 
-    _run_triage(email, service, date_filter)
+    _run_triage(email, service, sort_range)
 
 
 def _cancel_scheduled_run(email):
@@ -403,7 +426,13 @@ def api_auth_status(request: Request):
         return _unauthenticated()
     if get_user_token(email) is None:
         return _unauthenticated()
-    return JSONResponse({"authenticated": True, "email": email})
+    return JSONResponse(
+        {
+            "authenticated": True,
+            "email": email,
+            "has_search_data": has_embeddings(email),
+        }
+    )
 
 
 @app.post("/api/auth/logout")
@@ -411,6 +440,32 @@ def api_logout(request: Request):
     """Clear the session. Keeps the stored token so the user can reconnect."""
     request.session.clear()
     return JSONResponse({"status": "logged_out"})
+
+
+@app.get("/api/labels/guide")
+def api_labels_guide(request: Request):
+    """Return the labels this tool applies, each with a definition, plus a short
+    explanation of how emails are sorted into them."""
+    email = current_user_email(request)
+    if not email:
+        return _unauthenticated()
+    settings = get_user_settings(email)
+    definitions = category_definitions()
+    labels = [
+        {
+            "name": category,
+            "description": definitions.get(category)
+            or "This is your own category, so mail is sorted into it based on its name.",
+        }
+        for category in settings["categories"]
+    ]
+    return JSONResponse(
+        {
+            "labels": labels,
+            "how": CLASSIFICATION_SUMMARY,
+            "faq_category": settings["faq_category"],
+        }
+    )
 
 
 @app.post("/api/triage/schedule")
@@ -440,11 +495,9 @@ async def api_triage_schedule(request: Request):
             status_code=400,
         )
 
-    date_filter = body.get("date")
-    if not (isinstance(date_filter, str) and date_filter.strip()):
-        date_filter = None
-    else:
-        date_filter = date_filter.strip()
+    sort_range = body.get("range")
+    if sort_range not in RANGE_DAYS:
+        sort_range = "1d"
 
     # Replace any existing scheduled run for this user.
     _cancel_scheduled_run(email)
@@ -454,7 +507,7 @@ async def api_triage_schedule(request: Request):
         _run_scheduled_triage,
         trigger="date",
         run_date=run_at,
-        args=[email, date_filter],
+        args=[email, sort_range],
         id=job_id,
         replace_existing=True,
     )

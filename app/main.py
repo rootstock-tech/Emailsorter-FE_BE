@@ -32,7 +32,7 @@ def _account_email(service):
 DRAFTED_KEY = "FAQ (drafted)"
 
 
-def triage(service, max_results=200, categories=None, faq_category=None, user_email=None, progress_cb=None, work_offset=0.0, should_cancel=None, date_filter=None):
+def triage(service, max_results=200, categories=None, faq_category=None, user_email=None, progress_cb=None, work_offset=0.0, should_cancel=None, sort_range=None, date=None):
     """Fetch unread emails, classify and label each, return counts.
 
     The caller supplies an authenticated Gmail ``service`` object, so the same
@@ -56,7 +56,7 @@ def triage(service, max_results=200, categories=None, faq_category=None, user_em
         if faq_category is None:
             faq_category = DEFAULT_FAQ_CATEGORY
 
-    emails = fetch_unread_emails(service, max_results=max_results, date_filter=date_filter)
+    emails = fetch_unread_emails(service, max_results=max_results, sort_range=sort_range, date=date)
     logger.info("Fetched %d unread email(s).", len(emails))
     fetched = len(emails)
 
@@ -182,19 +182,20 @@ def triage(service, max_results=200, categories=None, faq_category=None, user_em
     return result
 
 
-def triage_until_empty(service, chunk_size=200, categories=None, faq_category=None, user_email=None, progress_cb=None, should_cancel=None, on_chunk_done=None, date_filter=None):
+def triage_until_empty(service, chunk_size=200, categories=None, faq_category=None, user_email=None, progress_cb=None, should_cancel=None, on_chunk_done=None, sort_range=None, date=None, max_total=None):
     """Run triage() in chunks until the inbox is caught up; return merged counts.
 
     Repeatedly processes up to ``chunk_size`` emails per iteration, merging the
-    per-category counts (summing values, including the drafted sub-count). Stops
-    as soon as an iteration's non-drafted counts sum to 0 (inbox caught up) or
-    ``should_cancel`` returns True. ``progress_cb`` receives cumulative work
-    units (see triage()), carried across chunks. ``on_chunk_done(chunk_index,
-    processed)`` is called after each chunk -- used to unlock features (e.g.
-    search) once the first chunk's emails are embedded.
+    per-category counts. Stops as soon as an iteration processes 0 real emails
+    (inbox caught up in the range), ``should_cancel`` returns True, or the
+    cumulative processed count reaches ``max_total`` (the range's cap).
+    ``progress_cb`` receives cumulative work units (see triage()), carried
+    across chunks. ``on_chunk_done(chunk_index, processed)`` runs after each
+    chunk (used to unlock search once the first chunk's emails are embedded).
     """
     merged = Counter()
     state = {"units": 0.0}
+    total_processed = 0
 
     def _report(value):
         state["units"] = value
@@ -206,16 +207,24 @@ def triage_until_empty(service, chunk_size=200, categories=None, faq_category=No
         if should_cancel is not None and should_cancel():
             break
 
+        this_chunk = chunk_size
+        if max_total is not None:
+            remaining = max_total - total_processed
+            if remaining <= 0:
+                break
+            this_chunk = min(chunk_size, remaining)
+
         counts = triage(
             service,
-            max_results=chunk_size,
+            max_results=this_chunk,
             categories=categories,
             faq_category=faq_category,
             user_email=user_email,
             progress_cb=_report,
             work_offset=state["units"],
             should_cancel=should_cancel,
-            date_filter=date_filter,
+            sort_range=sort_range,
+            date=date,
         )
 
         # Real emails processed this iteration (the drafted sub-count is not a
@@ -225,6 +234,7 @@ def triage_until_empty(service, chunk_size=200, categories=None, faq_category=No
         for key, value in counts.items():
             merged[key] += value
 
+        total_processed += processed
         chunk_index += 1
         if on_chunk_done is not None:
             on_chunk_done(chunk_index, processed)
@@ -232,6 +242,8 @@ def triage_until_empty(service, chunk_size=200, categories=None, faq_category=No
         if processed == 0:
             break
         if should_cancel is not None and should_cancel():
+            break
+        if max_total is not None and total_processed >= max_total:
             break
 
         time.sleep(2)

@@ -117,46 +117,50 @@ PROCESSED_LABEL = "AI-Processed"
 
 # When a date is chosen (or defaulted to today), fetch that day plus this many
 # previous days -- not just the single selected day.
-FETCH_WINDOW_DAYS = 10
+# How many days back from the anchor date each range covers. "1d" = the anchor
+# day; "1w" = the anchor day and the six days before it.
+RANGE_DAYS = {"1d": 1, "1w": 7}
+DEFAULT_RANGE = "1d"
 
 
-def _unread_query(date_filter=None):
+def _unread_query(sort_range=None, date=None):
     """Build the Gmail search query for inbox mail not yet processed.
 
     Includes BOTH read and unread inbox mail (only messages already carrying
-    PROCESSED_LABEL are excluded), so every message gets categorized -- not just
-    unread ones. If ``date_filter`` (a "YYYY-MM-DD" string) is given, restrict to
-    a window ending on that day and reaching back ``FETCH_WINDOW_DAYS`` days
-    (i.e. the selected date and the previous 10 days).
+    PROCESSED_LABEL are excluded). The window ends on ``date`` (a "YYYY-MM-DD"
+    string, or today if omitted) and reaches back by ``sort_range`` -- 1 day
+    ("1d") or 1 week ("1w"). All matching mail in that window is fetched.
     """
     query = f'in:inbox -label:"{PROCESSED_LABEL}"'
-    if date_filter:
+    days = RANGE_DAYS.get(sort_range, RANGE_DAYS[DEFAULT_RANGE])
+    anchor = None
+    if date:
         try:
-            day = datetime.strptime(date_filter, "%Y-%m-%d").date()
-            start = day - timedelta(days=FETCH_WINDOW_DAYS)
-            nxt = day + timedelta(days=1)
-            query += (
-                f" after:{start.strftime('%Y/%m/%d')}"
-                f" before:{nxt.strftime('%Y/%m/%d')}"
-            )
+            anchor = datetime.strptime(date, "%Y-%m-%d").date()
         except (TypeError, ValueError):
-            pass  # invalid date -> ignore the filter
-    return query
+            anchor = None
+    if anchor is None:
+        anchor = datetime.now().date()
+    end = anchor + timedelta(days=1)  # exclusive upper bound -> includes anchor day
+    start = end - timedelta(days=days)
+    return (
+        f"{query} after:{start.strftime('%Y/%m/%d')} "
+        f"before:{end.strftime('%Y/%m/%d')}"
+    )
 
 
-def fetch_unread_emails(service, max_results=400, date_filter=None):
-    """Return a list of *not-yet-processed* unread emails as dicts.
+def fetch_unread_emails(service, max_results=400, sort_range=None, date=None):
+    """Return a list of *not-yet-processed* inbox emails as dicts.
 
-    "Not yet processed" means unread and not already carrying
-    PROCESSED_LABEL, so repeated calls (e.g. one run per chunk of the
-    inbox) naturally advance through the inbox instead of refetching the
-    same emails. When ``date_filter`` ("YYYY-MM-DD") is given, only emails
-    from that day are fetched.
+    "Not yet processed" means not already carrying PROCESSED_LABEL, so repeated
+    calls (e.g. one run per chunk of the inbox) naturally advance through the
+    inbox instead of refetching the same emails. ``sort_range`` ("1d"/"1w") and
+    ``date`` set the window (see _unread_query).
 
     Each dict contains:
     {id, sender, subject, body, date, message_id_header, thread_id}.
     """
-    query = _unread_query(date_filter)
+    query = _unread_query(sort_range, date)
     emails = []
     next_page_token = None
 
@@ -207,10 +211,10 @@ def fetch_unread_emails(service, max_results=400, date_filter=None):
     return emails
 
 
-def count_unread_unprocessed(service, date_filter=None):
-    """Return Gmail's estimate of how many unread, not-yet-processed emails
-    remain (optionally limited to a single ``date_filter`` day). Used to show a
-    completion percentage during a run. Best-effort -- returns 0 on any error.
+def count_unread_unprocessed(service, sort_range=None, date=None):
+    """Return Gmail's estimate of how many not-yet-processed emails remain in
+    the selected window (see _unread_query). Used to show a completion
+    percentage during a run. Best-effort -- returns 0 on any error.
     """
     try:
         response = (
@@ -218,7 +222,7 @@ def count_unread_unprocessed(service, date_filter=None):
             .messages()
             .list(
                 userId="me",
-                q=_unread_query(date_filter),
+                q=_unread_query(sort_range, date),
                 maxResults=1,
             )
             .execute()

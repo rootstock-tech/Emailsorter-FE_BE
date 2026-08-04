@@ -31,7 +31,7 @@ DEFAULT_CATEGORIES = [
     "Needs Action",
     "FAQ",
     "Red Flag",
-    "Low Priority",
+    "Others",
     "Spam/Newsletter",
 ]
 DEFAULT_FAQ_CATEGORY = "FAQ"
@@ -39,7 +39,7 @@ DEFAULT_FAQ_CATEGORY = "FAQ"
 # A category that is always present and cannot be removed by the user: it is the
 # catch-all where emails that do not clearly fit any other category land, which
 # also guarantees the classifier never has to invent a new label.
-FIXED_CATEGORY = "Low Priority"
+FIXED_CATEGORY = "Others"
 
 
 def ensure_fixed_category(categories):
@@ -274,3 +274,16 @@ def get_embeddings_for_user(user_email):
             }
         )
     return results
+
+
+def has_embeddings(user_email):
+    """Return True if the user has at least one stored (searchable) email."""
+    conn = _connect()
+    try:
+        cur = conn.execute(
+            "SELECT 1 FROM email_embeddings WHERE user_email = ? LIMIT 1",
+            (user_email,),
+        )
+        return cur.fetchone() is not None
+    finally:
+        conn.close()

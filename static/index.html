@@ -43,13 +43,22 @@
           </p>
           <div class="actions run-row">
             <button id="run-btn" class="btn">Run Triage</button>
-            <div class="field inline-field" id="run-date-field">
-              <label for="run-date">For date</label>
-              <input id="run-date" type="date" aria-label="Run date" />
+            <div class="field inline-field" id="run-range-field">
+              <label for="run-date">Sort up to</label>
+              <input id="run-date" type="date" aria-label="Sort up to date" />
+              <select id="sort-range" aria-label="Range">
+                <option value="1d">Up to 1 day</option>
+                <option value="1w">Up to 1 week</option>
+              </select>
             </div>
             <button id="stop-triage-btn" class="btn btn-ghost hidden">Stop</button>
             <span id="status" class="muted"></span>
           </div>
+          <p class="field-hint muted run-hint">
+            Fetches all inbox mail (read and unread) from the chosen date, going
+            back up to 1 day or 1 week. A scheduled run sorts the last day/week
+            at the time it runs.
+          </p>
           <p id="scheduled-line" class="scheduled-line hidden">
             <span id="scheduled-text"></span>
             <a href="#" id="cancel-schedule" class="link-inline">Cancel</a>
@@ -124,6 +133,10 @@
             />
             <button id="search-btn" class="btn">Search</button>
           </div>
+          <p id="search-lock-msg" class="search-lock-msg hidden">
+            You have to process or fetch your mails first to start searching
+            here. Run Triage, then come back.
+          </p>
           <div id="search-results" class="search-results"></div>
         </section>
 
@@ -148,6 +161,13 @@
               >Open Drafts</a
             >
           </div>
+        </section>
+
+        <!-- Label guide -->
+        <section id="labels-card" class="card hidden">
+          <h2>Label guide</h2>
+          <p class="muted" id="labels-how"></p>
+          <div id="labels-list"></div>
         </section>
       </div>
     </main>

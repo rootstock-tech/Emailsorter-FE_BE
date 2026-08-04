@@ -14,8 +14,10 @@ const stopTriageBtn = document.getElementById("stop-triage-btn");
 const userBox = document.getElementById("user-box");
 const userEmailEl = document.getElementById("user-email");
 const signoutBtn = document.getElementById("signout-btn");
+const sortRange = document.getElementById("sort-range");
 const runDateInput = document.getElementById("run-date");
-const runDateField = document.getElementById("run-date-field");
+const runRangeField = document.getElementById("run-range-field");
+const runHint = document.querySelector(".run-hint");
 const scheduleDateInput = document.getElementById("schedule-date");
 const scheduleHour = document.getElementById("schedule-hour");
 const scheduleMinute = document.getElementById("schedule-minute");
@@ -27,6 +29,9 @@ const cancelScheduleLink = document.getElementById("cancel-schedule");
 const openGmailLink = document.getElementById("open-gmail-link");
 const openDraftsLink = document.getElementById("open-drafts-link");
 const linksCard = document.getElementById("links-card");
+const labelsCard = document.getElementById("labels-card");
+const labelsList = document.getElementById("labels-list");
+const labelsHow = document.getElementById("labels-how");
 const categoriesCard = document.getElementById("categories-card");
 const categoryListEl = document.getElementById("category-list");
 const addCategoryBtn = document.getElementById("add-category-btn");
@@ -37,12 +42,13 @@ const searchCard = document.getElementById("search-card");
 const searchInput = document.getElementById("search-input");
 const searchBtn = document.getElementById("search-btn");
 const searchResultsEl = document.getElementById("search-results");
+const searchLockMsg = document.getElementById("search-lock-msg");
 
 const DRAFTED_KEY = "FAQ (drafted)";
 
 // This category is always kept and cannot be removed or renamed in the UI --
 // it is the catch-all for emails that don't fit any other category.
-const FIXED_CATEGORY = "Low Priority";
+const FIXED_CATEGORY = "Others";
 
 // The user's working copy of their category list (edited in the Categories
 // card, saved via POST /api/settings/categories).
@@ -53,7 +59,7 @@ const CATEGORY_ORDER = [
   "Needs Action",
   "Red Flag",
   "FAQ",
-  "Low Priority",
+  "Others",
   "Spam/Newsletter",
 ];
 
@@ -65,8 +71,25 @@ let pollActive = false;
 // the Run button is replaced by the scheduled banner.
 let isScheduled = false;
 
+// True once the user has processed/fetched mail (embeddings exist); search stays
+// locked until then.
+let searchAvailable = false;
+
+// While now < this timestamp, schedule-state polling is ignored so a just-issued
+// manual cancel can't be flipped back by an in-flight/next poll.
+let suppressScheduleRefreshUntil = 0;
+
 async function init() {
   buildNeuralTree();
+
+  if (new URLSearchParams(location.search).has("auth_error")) {
+    const p = document.querySelector("#auth-card .muted");
+    if (p) {
+      p.textContent =
+        "Sign in didn't complete. Click Connect Gmail and finish the Google consent in one go, in the same tab.";
+      p.style.color = "#a8321f";
+    }
+  }
 
   try {
     const res = await fetch("/api/auth/status");
@@ -78,6 +101,9 @@ async function init() {
 
     if (data.authenticated) {
       showAuthenticated(data.email);
+      searchAvailable = !!data.has_search_data;
+      updateSearchLock();
+      loadLabelGuide();
       await loadCategories();
       loadLastSummary();
       await refreshScheduleState();
@@ -96,6 +122,7 @@ function showConnect() {
   categoriesCard.classList.add("hidden");
   searchCard.classList.add("hidden");
   linksCard.classList.add("hidden");
+  labelsCard.classList.add("hidden");
   userBox.classList.add("hidden");
 }
 
@@ -105,14 +132,14 @@ function showAuthenticated(email) {
   categoriesCard.classList.remove("hidden");
   searchCard.classList.remove("hidden");
   linksCard.classList.remove("hidden");
+  labelsCard.classList.remove("hidden");
   userBox.classList.remove("hidden");
   userEmailEl.textContent = email || "";
 
-  // Populate the schedule time picker and default both date inputs to today.
+  // Populate the schedule time picker and default the dates to today.
   initScheduleControls();
-  const today = todayLocalDate();
-  if (!runDateInput.value) runDateInput.value = today;
-  if (!scheduleDateInput.value) scheduleDateInput.value = today;
+  if (!runDateInput.value) runDateInput.value = todayLocalDate();
+  if (!scheduleDateInput.value) scheduleDateInput.value = todayLocalDate();
 
   // Point quick links at the specific connected account, not whichever
   // Google account happens to be signed in first in the browser.
@@ -145,6 +172,26 @@ async function loadLastSummary() {
     }
   } catch (err) {
     // No prior summary is fine; ignore.
+  }
+}
+
+async function loadLabelGuide() {
+  try {
+    const res = await fetch("/api/labels/guide");
+    if (!res.ok) return;
+    const data = await res.json();
+    labelsHow.textContent = data.how || "";
+    labelsList.innerHTML = (data.labels || [])
+      .map(
+        (l) => `
+        <div class="label-guide-row">
+          <span class="label-guide-name">${escapeHtml(l.name)}</span>
+          <span class="label-guide-desc">${escapeHtml(l.description)}</span>
+        </div>`
+      )
+      .join("");
+  } catch (err) {
+    // Non-critical; leave the guide as-is on failure.
   }
 }
 
@@ -195,7 +242,7 @@ function renderCategoryList() {
       // Fixed catch-all: can't be renamed or removed.
       input.readOnly = true;
       input.title =
-        "Low Priority is always kept as the catch-all category and can't be renamed or removed.";
+        "Others is always kept as the catch-all category and can't be renamed or removed.";
     } else {
       input.addEventListener("input", () => {
         currentCategories[index] = input.value;
@@ -312,6 +359,7 @@ async function saveCategories() {
     renderCategoryList();
     rebuildFaqSelect(data.faq_category || "");
     categoriesStatusEl.textContent = "Saved.";
+    loadLabelGuide();
   } catch (err) {
     categoriesStatusEl.textContent = `Could not save: ${err.message}`;
   } finally {
@@ -349,7 +397,8 @@ function showScheduled(runAtIso) {
   // A manual run can't be started while one is scheduled: replace the Run
   // Triage button (and its date) with the scheduled message.
   runBtn.classList.add("hidden");
-  runDateField.classList.add("hidden");
+  runRangeField.classList.add("hidden");
+  if (runHint) runHint.classList.add("hidden");
   setScheduleInputsDisabled(true);
 }
 
@@ -357,7 +406,8 @@ function hideScheduled() {
   isScheduled = false;
   scheduledLine.classList.add("hidden");
   runBtn.classList.remove("hidden");
-  runDateField.classList.remove("hidden");
+  runRangeField.classList.remove("hidden");
+  if (runHint) runHint.classList.remove("hidden");
   setScheduleInputsDisabled(false);
   // IMPORTANT: do NOT clear the inputs here. refreshScheduleState() calls this
   // on every poll, so clearing would wipe what the user is entering. Only an
@@ -373,6 +423,7 @@ function setScheduleInputsDisabled(disabled) {
 }
 
 async function refreshScheduleState() {
+  if (Date.now() < suppressScheduleRefreshUntil) return;
   try {
     const res = await fetch("/api/triage/schedule");
     if (!res.ok) return;
@@ -416,14 +467,7 @@ function initScheduleControls() {
 
 async function onRunClick() {
   if (isScheduled) return; // a run is scheduled -> manual run is disabled
-  const today = todayLocalDate();
-  const date = runDateInput.value || today;
-  if (date > today) {
-    statusEl.textContent =
-      'Run date can\u2019t be in the future \u2014 use "Schedule triage" below for later runs.';
-    return;
-  }
-  await runTriage(date);
+  await runTriage(sortRange.value, runDateInput.value);
 }
 
 async function onScheduleClick() {
@@ -444,19 +488,19 @@ async function onScheduleClick() {
     statusEl.textContent = "Please choose a future date and time.";
     return;
   }
-  await scheduleRun(localValue, date);
+await scheduleRun(localValue, sortRange.value);
 }
 
-async function scheduleRun(localDateTimeValue, dateFilter) {
+async function scheduleRun(localDateTimeValue, range) {
   scheduleBtn.disabled = true;
-  statusEl.textContent = "Scheduling…";
+  statusEl.textContent = "Scheduling\u2026";
 
   try {
     const runAtIso = new Date(localDateTimeValue).toISOString();
     const res = await fetch("/api/triage/schedule", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ run_at: runAtIso, date: dateFilter }),
+      body: JSON.stringify({ run_at: runAtIso, range: range || "1d" }),
     });
     if (res.status === 401) {
       showConnect();
@@ -479,13 +523,16 @@ async function scheduleRun(localDateTimeValue, dateFilter) {
 async function cancelSchedule(event) {
   event.preventDefault();
   if (cancelScheduleLink.classList.contains("disabled")) return;
+  // Update the UI right away and suppress polls so the banner cannot flip back
+  // before the server has removed the scheduled job.
+  suppressScheduleRefreshUntil = Date.now() + 6000;
+  hideScheduled();
+  scheduleDateInput.value = todayLocalDate();
   try {
     await fetch("/api/triage/schedule/cancel", { method: "POST" });
   } catch (err) {
-    // Revert the UI regardless of the response.
+    // The suppression window expires and the next poll reflects the real state.
   }
-  hideScheduled();
-  scheduleDateInput.value = todayLocalDate();
 }
 
 function setSearchEnabled(enabled) {
@@ -498,6 +545,7 @@ function setBusy(isBusy) {
   // clickable; search is unlocked separately once the first chunk lands.
   runBtn.disabled = isBusy;
   runDateInput.disabled = isBusy;
+  sortRange.disabled = isBusy;
   setScheduleInputsDisabled(isBusy);
   addCategoryBtn.disabled = isBusy;
   saveCategoriesBtn.disabled = isBusy;
@@ -542,19 +590,18 @@ async function cancelTriage() {
   }
 }
 
-async function runTriage(dateFilter) {
+async function runTriage(range, date) {
   setBusy(true);
   statusEl.textContent = "";
   resultsCard.classList.add("hidden");
   showProgressStarting();
 
   try {
-    const options = { method: "POST" };
-    if (dateFilter) {
-      options.headers = { "Content-Type": "application/json" };
-      options.body = JSON.stringify({ date: dateFilter });
-    }
-    const res = await fetch("/api/triage", options);
+    const res = await fetch("/api/triage", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ range: range || "1d", date: date || null }),
+    });
     if (res.status === 401) {
       showConnect();
       statusEl.textContent = "";
@@ -595,6 +642,7 @@ async function pollUntilDone() {
 
     if (progress.first_chunk_done) {
       setSearchEnabled(true);
+      unlockSearch();
     }
 
     if (progress.status === "done") {
@@ -640,6 +688,7 @@ async function startWatchLoop() {
         const progress = await res.json();
         if (progress.first_chunk_done) {
           setSearchEnabled(true);
+          unlockSearch();
         }
         if (progress.status === "running") {
           renderProgress(progress);
@@ -726,7 +775,27 @@ function escapeHtml(str) {
 
 // --- Semantic search ---
 
+function updateSearchLock() {
+  const locked = !searchAvailable;
+  searchInput.classList.toggle("locked", locked);
+  searchInput.readOnly = locked;
+  if (!locked) searchLockMsg.classList.add("hidden");
+}
+
+function showSearchLock() {
+  searchLockMsg.classList.remove("hidden");
+}
+
+function unlockSearch() {
+  searchAvailable = true;
+  updateSearchLock();
+}
+
 async function runSearch() {
+  if (!searchAvailable) {
+    showSearchLock();
+    return;
+  }
   const query = searchInput.value.trim();
   if (!query) {
     searchResultsEl.innerHTML =
@@ -840,7 +909,7 @@ function buildNeuralTree() {
         x: x2,
         y: y2,
         color: Math.random() > 0.6 ? "#415b3e" : "#0b182f",
-        size: 3 + Math.random() * 3,
+        size: 2 + Math.random() * 2.2,
         delay: endTime,
       });
     }
@@ -859,10 +928,9 @@ function buildNeuralTree() {
     }
   }
 
-  // Start lower-left of center and lean to the upper-right so the canopy fans
-  // toward the top-right corner, matching the RootStock site layout (tree offset
-  // to the side rather than dead center, where the dashboard would cover it).
-  generateBranch(780, 920, 60, 195, 6, 0);
+  // Grow straight up (angle 90) from the right side, anchored to the right edge
+  // so the tree stays upright and offset to the right rather than dead center.
+  generateBranch(1080, 930, 90, 148, 6, 0);
 
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", "0 0 1440 900");
@@ -928,6 +996,9 @@ cancelScheduleLink.addEventListener("click", cancelSchedule);
 addCategoryBtn.addEventListener("click", addCategory);
 saveCategoriesBtn.addEventListener("click", saveCategories);
 searchBtn.addEventListener("click", runSearch);
+searchInput.addEventListener("click", () => {
+  if (!searchAvailable) showSearchLock();
+});
 searchInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") runSearch();
 });
@@ -936,5 +1007,11 @@ searchInput.addEventListener("input", () => {
   if (searchInput.value.trim() === "") {
     searchResultsEl.innerHTML = "";
   }
+});
+document.addEventListener("click", (event) => {
+  // Dismiss the search lock message when clicking away from the search box.
+  if (searchLockMsg.classList.contains("hidden")) return;
+  if (event.target === searchInput || event.target === searchBtn) return;
+  searchLockMsg.classList.add("hidden");
 });
 init();

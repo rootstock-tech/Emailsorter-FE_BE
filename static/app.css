@@ -308,6 +308,11 @@ select:disabled {
   gap: 1rem;
 }
 
+.run-hint {
+  margin-top: 0.6rem;
+  margin-bottom: 0;
+}
+
 .inline-field {
   flex-direction: row;
   align-items: center;
@@ -320,7 +325,8 @@ select:disabled {
   white-space: nowrap;
 }
 
-.inline-field input {
+.inline-field input,
+.inline-field select {
   background: var(--track);
   border: 1px solid var(--border);
   color: var(--text);
@@ -472,6 +478,36 @@ select:disabled {
   background: rgba(65, 91, 62, 0.08);
 }
 
+/* Label guide */
+#labels-how {
+  font-size: 0.88rem;
+  margin: 0 0 0.9rem;
+}
+
+.label-guide-row {
+  display: flex;
+  gap: 0.85rem;
+  padding: 0.55rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.label-guide-row:last-child {
+  border-bottom: none;
+}
+
+.label-guide-name {
+  flex-shrink: 0;
+  width: 130px;
+  font-weight: 700;
+  color: var(--accent);
+  font-size: 0.9rem;
+}
+
+.label-guide-desc {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
 /* Category settings */
 #category-list {
   display: flex;
@@ -542,6 +578,22 @@ select:disabled {
   font-size: 1rem;
 }
 
+.search-input.locked {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* Callout shown when the user searches before processing any mail */
+.search-lock-msg {
+  margin: 0.75rem 0 0;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid var(--draft-accent);
+  background: rgba(168, 120, 31, 0.12);
+  border-radius: 10px;
+  color: var(--draft-accent);
+  font-size: 0.9rem;
+}
+
 .search-results {
   display: flex;
   flex-direction: column;
@@ -582,7 +634,7 @@ select:disabled {
 }
 
 .hidden {
-  display: none;
+  display: none !important;
 }
 
 /* Schedule ("Run on") field */

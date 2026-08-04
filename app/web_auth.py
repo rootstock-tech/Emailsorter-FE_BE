@@ -47,16 +47,16 @@ def _build_flow():
 
 
 def login_url():
-    """Return (auth_url, code_verifier) for redirecting the user to Google.
+    """Return (auth_url, state, code_verifier) for redirecting the user to Google.
 
     The Flow generates a fresh PKCE code_verifier/code_challenge pair here.
-    The verifier MUST be persisted (e.g. in the session) by the caller and
-    passed back into exchange_code() -- a *different* Flow instance is used
-    for the callback, and it has no way to recover the original verifier on
-    its own.
+    The verifier and state MUST be persisted (e.g. in the session) by the caller
+    and passed back / checked at exchange_code() -- a *different* Flow instance
+    is used for the callback, and it has no way to recover the original verifier
+    on its own.
     """
     flow = _build_flow()
-    auth_url, _state = flow.authorization_url(
+    auth_url, state = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
         # "select_account" makes Google show the account chooser (any Google
@@ -65,7 +65,7 @@ def login_url():
         # since this app supports multiple users.
         prompt="select_account consent",
     )
-    return auth_url, flow.code_verifier
+    return auth_url, state, flow.code_verifier
 
 
 def exchange_code(code, code_verifier):
