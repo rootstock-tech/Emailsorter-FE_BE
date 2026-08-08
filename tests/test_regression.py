@@ -13,9 +13,10 @@ from fastapi import BackgroundTasks
 from app import config, db
 from app import server
 from app.classifier import classify_emails
-from app.deadlines import extract_deadline
+from app.deadlines import extract_deadline, extract_deadline_with_llm
 from app.gmail_client import authenticate_from_token_json, unread_message_ids
 from app.priority import compute_priority
+from app.reminders import send_user_reminders
 from app.summarize import summarize_email
 
 
@@ -41,6 +42,27 @@ class DatabaseRegressionTests(unittest.TestCase):
 
         active = db.get_active_rules(user)
         self.assertEqual(db.match_learned_rule(active, sender), "Needs Action")
+
+    def test_weighted_correction_captures_subject_and_old_category(self):
+        user = "user@example.com"
+        db.record_user_correction(
+            user,
+            "Billing <billing@acme.com>",
+            "Needs Action",
+            subject="Invoice approval required",
+            old_category="Others",
+        )
+
+        active = db.get_active_rules(user)
+        self.assertEqual(
+            db.match_weighted_rule(
+                active,
+                {"sender": "billing@acme.com", "subject": "Invoice approval required today"},
+            ),
+            "Needs Action",
+        )
+        self.assertIn("invoice", active["weighted"][0]["keyword_signature"])
+        self.assertTrue(active["context"])
 
     def test_automatic_others_rule_is_not_recorded(self):
         user = "user@example.com"
@@ -77,6 +99,16 @@ class DatabaseRegressionTests(unittest.TestCase):
         self.assertEqual(db.known_contacts(user), {"alice@acme.com"})
         self.assertEqual(db.list_known_contacts(user)[0]["reason"], "user replied")
 
+    def test_conversation_memory_preserves_active_status_and_updates_category(self):
+        user = "user@example.com"
+        db.remember_conversation(user, "thread-1", "Alice <alice@acme.com>", status="active", category="Needs Action")
+        db.remember_conversation(user, "thread-1", "alice@acme.com", status="observed", category="FAQ")
+
+        conversation = db.get_conversation(user, "thread-1")
+        self.assertEqual(conversation["status"], "active")
+        self.assertEqual(conversation["last_category"], "FAQ")
+        self.assertEqual(conversation["participant"], "alice@acme.com")
+
     def test_deadlines_are_upserted_and_ordered(self):
         user = "user@example.com"
         db.save_deadline(user, "m2", "t2", "Later", "b@example.com", "2099-08-20", "Later")
@@ -87,6 +119,31 @@ class DatabaseRegressionTests(unittest.TestCase):
 
         self.assertEqual([item["gmail_id"] for item in items], ["m1", "m2"])
         self.assertEqual(items[0]["due_date"], "2099-08-09")
+
+    def test_reminder_state_enforces_gap_and_max_count(self):
+        user = "user@example.com"
+        now = datetime(2026, 8, 8, 12, tzinfo=timezone.utc)
+        self.assertTrue(db.reminder_due(user, "m1", "attention", now=now))
+        db.mark_reminded(user, "m1", "attention", now=now)
+        self.assertFalse(db.reminder_due(user, "m1", "attention", now=now))
+        self.assertTrue(
+            db.reminder_due(
+                user,
+                "m1",
+                "attention",
+                now=datetime(2026, 8, 9, 13, tzinfo=timezone.utc),
+            )
+        )
+        db.mark_reminded(user, "m1", "attention", now=datetime(2026, 8, 9, 13, tzinfo=timezone.utc))
+        db.mark_reminded(user, "m1", "attention", now=datetime(2026, 8, 10, 14, tzinfo=timezone.utc))
+        self.assertFalse(
+            db.reminder_due(
+                user,
+                "m1",
+                "attention",
+                now=datetime(2026, 8, 12, 14, tzinfo=timezone.utc),
+            )
+        )
 
 
 class ClassifierRegressionTests(unittest.TestCase):
@@ -151,6 +208,21 @@ class FeatureRegressionTests(unittest.TestCase):
             extract_deadline({"subject": "Meeting 15 Aug 2026", "body": ""}, today=date(2026, 8, 8)),
             (None, None),
         )
+
+    def test_llm_deadline_fallback_validates_structured_future_date(self):
+        payload = '{"has_deadline":true,"date":"2026-08-09","what":"Submit report"}'
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=payload))]
+        )
+        client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **kwargs: response))
+        )
+        with patch("app.deadlines._get_client", return_value=client):
+            result = extract_deadline_with_llm(
+                {"subject": "Report due tomorrow", "body": "Please submit tomorrow."},
+                today=date(2026, 8, 8),
+            )
+        self.assertEqual(result, ("2026-08-09", "Submit report"))
 
     def test_reply_gets_priority_boost(self):
         now = format_datetime(datetime.now(timezone.utc))
@@ -223,6 +295,29 @@ class FeatureRegressionTests(unittest.TestCase):
             patch("app.summarize.logger.exception"),
         ):
             self.assertIsNone(summarize_email("Subject", "Body"))
+
+    def test_reminder_engine_marks_only_after_successful_send(self):
+        attention = [{"gmail_id": "m1", "category": "Needs Action", "subject": "Approve", "sender": "a@b.com"}]
+        deadlines = [{"gmail_id": "m2", "due_date": "2026-08-10", "subject": "Submit"}]
+        marked = []
+        with (
+            patch("app.reminders.collect_due_reminders", return_value=(attention, deadlines)),
+            patch("app.reminders.send_reminder_email") as send,
+            patch("app.reminders.mark_reminded", side_effect=lambda *args, **kwargs: marked.append(args)),
+        ):
+            result = send_user_reminders(object(), "user@example.com")
+        self.assertTrue(result["sent"])
+        send.assert_called_once()
+        self.assertEqual(len(marked), 2)
+
+        with (
+            patch("app.reminders.collect_due_reminders", return_value=(attention, [])),
+            patch("app.reminders.send_reminder_email", side_effect=RuntimeError("send failed")),
+            patch("app.reminders.mark_reminded") as mark,
+        ):
+            with self.assertRaises(RuntimeError):
+                send_user_reminders(object(), "user@example.com")
+        mark.assert_not_called()
 
 
 class AddonContractTests(unittest.TestCase):
@@ -345,6 +440,39 @@ class DeploymentSafetyTests(unittest.TestCase):
         self.assertEqual(execute.call_args.args[1], plan["parsed"])
         self.assertEqual(execute.call_args.args[2], ["m1", "m2"])
         self.assertNotIn("command_preview", request.session)
+
+    def test_addon_summarize_can_fetch_message_by_gmail_id(self):
+        request = self.Request(
+            body={"email": "user@example.com", "gmail_id": "gmail-1"},
+        )
+        with (
+            patch("app.server._addon_authorized", return_value=True),
+            patch("app.server.get_user_token", return_value="token"),
+            patch("app.server._service_for_user", return_value=object()),
+            patch(
+                "app.server.fetch_email_by_id",
+                return_value={"subject": "Subject", "body": "Body", "sender": "Alice"},
+            ) as fetch,
+            patch("app.server.summarize_email", return_value="- Summary") as summarize,
+        ):
+            response = asyncio.run(server.api_addon_summarize(request))
+
+        self.assertEqual(response.status_code, 200)
+        fetch.assert_called_once()
+        summarize.assert_called_once_with("Subject", "Body", "Alice")
+        self.assertEqual(json.loads(response.body)["summary"], "- Summary")
+
+    def test_dedicated_addon_alerts_endpoint(self):
+        request = self.Request(query={"email": "user@example.com"})
+        expected = [{"gmail_id": "m1", "category": "Needs Action"}]
+        with (
+            patch("app.server._addon_authorized", return_value=True),
+            patch("app.server.get_user_token", return_value="token"),
+            patch("app.server._addon_alert_items", return_value=expected),
+        ):
+            response = server.api_addon_alerts(request, limit=3)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.body)["alerts"], expected)
 
     def test_partial_undo_remains_retryable(self):
         actions = [

@@ -100,17 +100,13 @@ function onGmailMessageOpen(e) {
 }
 
 function summarizeCurrentMessage(e) {
-  var accessToken = e && e.gmail ? e.gmail.accessToken : null;
   var messageId = e && e.gmail ? e.gmail.messageId : null;
-  if (!accessToken || !messageId) {
+  if (!messageId) {
     return notify_('Open an email first, then tap Summarize.');
   }
-  GmailApp.setCurrentMessageAccessToken(accessToken);
-  var message = GmailApp.getMessageById(messageId);
   var result = apiPost_('/api/addon/summarize', {
-    subject: message.getSubject(),
-    body: message.getPlainBody(),
-    sender: message.getFrom(),
+    email: getUserEmail_(),
+    gmail_id: messageId,
   });
   if (!result || result.error || !result.summary) {
     return notify_('Could not summarize right now. Try again.');

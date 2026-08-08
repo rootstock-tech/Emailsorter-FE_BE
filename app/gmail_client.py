@@ -3,7 +3,8 @@
 import base64
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
 from email.utils import parsedate_to_datetime
 
 from google.auth.transport.requests import Request
@@ -126,6 +127,17 @@ def _parse_date(raw_date):
         return raw_date
 
 
+def _internal_date(message, fallback=""):
+    """Return Gmail's trusted received timestamp, falling back to Date header."""
+    try:
+        return datetime.fromtimestamp(
+            int(message.get("internalDate")) / 1000,
+            tz=timezone.utc,
+        ).isoformat()
+    except (TypeError, ValueError):
+        return fallback
+
+
 # Applied to every email once triage has processed it (in addition to its
 # category label). Lets each run pick up where the previous one left off --
 # unread emails already carrying this label are excluded from the next
@@ -217,7 +229,10 @@ def fetch_unread_emails(service, max_results=400, sort_range=None, date=None):
                     "sender": _get_header(headers, "From"),
                     "subject": _get_header(headers, "Subject"),
                     "body": _extract_body(payload),
-                    "date": _parse_date(_get_header(headers, "Date")),
+                    "date": _internal_date(
+                        message,
+                        _parse_date(_get_header(headers, "Date")),
+                    ),
                     "message_id_header": _get_header(headers, "Message-ID"),
                     "thread_id": message.get("threadId", ""),
                     "in_reply_to": in_reply_to,
@@ -236,6 +251,25 @@ def fetch_unread_emails(service, max_results=400, sort_range=None, date=None):
             break
 
     return emails
+
+
+def fetch_email_by_id(service, gmail_id):
+    """Fetch one Gmail message and return the fields used by summarization."""
+    message = (
+        service.users()
+        .messages()
+        .get(userId="me", id=gmail_id, format="full")
+        .execute()
+    )
+    payload = message.get("payload", {})
+    headers = payload.get("headers", [])
+    return {
+        "id": message.get("id", gmail_id),
+        "thread_id": message.get("threadId", ""),
+        "sender": _get_header(headers, "From"),
+        "subject": _get_header(headers, "Subject"),
+        "body": _extract_body(payload),
+    }
 
 
 def thread_has_user_reply(service, thread_id):
@@ -285,6 +319,21 @@ def unread_message_ids(service, gmail_ids):
         if "UNREAD" in (msg.get("labelIds") or []):
             still_unread.add(gmail_id)
     return still_unread
+
+
+def send_reminder_email(service, recipient, subject, body):
+    """Send a plain-text reminder from the connected Gmail account to itself."""
+    message = EmailMessage()
+    message["To"] = recipient
+    message["Subject"] = subject
+    message.set_content(body)
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
+    return (
+        service.users()
+        .messages()
+        .send(userId="me", body={"raw": raw})
+        .execute()
+    )
 
 
 def count_unread_unprocessed(service, sort_range=None, date=None):

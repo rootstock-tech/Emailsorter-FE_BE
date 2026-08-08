@@ -57,6 +57,7 @@ from app.config import (
     ADDON_SHARED_SECRET,
     GMAIL_PUBSUB_TOPIC,
     PUSH_AUTH_TOKEN,
+    REMINDER_EMAILS_ENABLED,
     SESSION_HTTPS_ONLY,
     SESSION_SECRET,
     validate_production_config,
@@ -99,10 +100,12 @@ from app.gmail_client import (
     RANGE_DAYS,
     authenticate_from_token_json,
     count_unread_unprocessed,
+    fetch_email_by_id,
     start_watch,
     unread_message_ids,
 )
 from app.main import triage_until_empty
+from app.reminders import send_user_reminders
 from app.search import search_emails
 from app.web_auth import exchange_code, login_url
 
@@ -130,6 +133,14 @@ async def lifespan(_app: FastAPI):
             "interval",
             hours=24,
             id="gmail_watch_renewal",
+            replace_existing=True,
+        )
+    if REMINDER_EMAILS_ENABLED:
+        scheduler.add_job(
+            _send_all_reminders,
+            "interval",
+            hours=3,
+            id="email_reminders",
             replace_existing=True,
         )
     # Restore recurring auto-triage jobs saved by users across restarts.
@@ -816,17 +827,7 @@ def api_addon_digest(request: Request):
     rules = list_learned_rules(email)
     active_rules = sum(1 for r in rules if r.get("active"))
     top = _with_gmail_url(top_priority(email, 3), email)
-    # Alerts: pressing mail (red-flag / needs-action) the user hasn't opened yet.
-    alert_cats = {"red flag", "needs action"}
-    candidates = [
-        p for p in top_priority(email, 15)
-        if (p.get("category") or "").lower() in alert_cats
-    ]
-    service = _service_for_user(email)
-    if service is not None and candidates:
-        unread = unread_message_ids(service, [c.get("gmail_id") for c in candidates])
-        candidates = [c for c in candidates if c.get("gmail_id") in unread]
-    alerts = _with_gmail_url(candidates[:3], email)
+    alerts = _addon_alert_items(email, limit=3)
     deadlines = _with_gmail_url(upcoming_deadlines(email, limit=3), email)
     run = last_undoable_run(email)
     return JSONResponse(
@@ -842,6 +843,34 @@ def api_addon_digest(request: Request):
     )
 
 
+def _addon_alert_items(email, limit=3):
+    alert_cats = {"red flag", "needs action"}
+    candidates = [
+        item
+        for item in top_priority(email, 50)
+        if (item.get("category") or "").lower() in alert_cats
+    ]
+    service = _service_for_user(email)
+    if service is None or not candidates:
+        return []
+    unread = unread_message_ids(service, [item.get("gmail_id") for item in candidates])
+    return _with_gmail_url(
+        [item for item in candidates if item.get("gmail_id") in unread][:limit],
+        email,
+    )
+
+
+@app.get("/api/addon/alerts")
+def api_addon_alerts(request: Request, limit: int = 3):
+    """Return still-unread Needs Action and Red Flag mail for the add-on."""
+    if not _addon_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    email = request.query_params.get("email")
+    if not email or get_user_token(email) is None:
+        return JSONResponse({"error": "user not connected"}, status_code=404)
+    return JSONResponse({"alerts": _addon_alert_items(email, max(1, min(limit, 20)))})
+
+
 @app.post("/api/addon/summarize")
 async def api_addon_summarize(request: Request):
     """Summarise one mail into a few bullets for the Gmail Add-on."""
@@ -854,6 +883,22 @@ async def api_addon_summarize(request: Request):
     subject = (body or {}).get("subject") or ""
     mail_body = (body or {}).get("body") or ""
     sender = (body or {}).get("sender") or ""
+    gmail_id = (body or {}).get("gmail_id")
+    email = (body or {}).get("email")
+    if gmail_id:
+        if not email or get_user_token(email) is None:
+            return JSONResponse({"error": "user not connected"}, status_code=404)
+        service = _service_for_user(email)
+        if service is None:
+            return JSONResponse({"error": "user not connected"}, status_code=404)
+        try:
+            message = fetch_email_by_id(service, gmail_id)
+        except Exception:  # noqa: BLE001 - return a safe add-on error
+            logger.exception("Could not fetch message %s for summarization.", gmail_id)
+            return JSONResponse({"error": "message unavailable"}, status_code=404)
+        subject = message.get("subject") or ""
+        mail_body = message.get("body") or ""
+        sender = message.get("sender") or ""
     if not subject and not mail_body:
         return JSONResponse({"error": "nothing to summarize"}, status_code=400)
     summary = summarize_email(subject, mail_body, sender)
@@ -1011,8 +1056,8 @@ async def api_update_learned_rule(request: Request):
 async def api_feedback(request: Request):
     """Learn from a manual relabel: force the sender into the chosen category.
 
-    Body: {sender, category}. The correction becomes an active learned rule at
-    once, so the next mail from that sender is sorted the user's way.
+    Body: {sender, subject, old_category, category}. The correction becomes an
+    active weighted rule at once.
     """
     email = current_user_email(request)
     if not email:
@@ -1029,12 +1074,20 @@ async def api_feedback(request: Request):
 
     sender = body.get("sender")
     category = body.get("category")
+    subject = body.get("subject") if isinstance(body.get("subject"), str) else ""
+    old_category = body.get("old_category")
     if not isinstance(sender, str) or not sender.strip():
         return JSONResponse({"error": "sender is required."}, status_code=400)
     if not isinstance(category, str) or not category.strip():
         return JSONResponse({"error": "category is required."}, status_code=400)
 
-    record_user_correction(email, sender, category.strip())
+    record_user_correction(
+        email,
+        sender,
+        category.strip(),
+        subject=subject,
+        old_category=old_category if isinstance(old_category, str) else None,
+    )
     # A correction out of spam also means this is someone the user deals with,
     # so remember them as a contact (never spam going forward).
     if "spam" not in category.lower() and "newsletter" not in category.lower():
@@ -1298,6 +1351,17 @@ def _renew_all_watches():
     """Re-register watches for every connected user (scheduled daily)."""
     for email in list_user_emails():
         _register_watch(email)
+
+
+def _send_all_reminders():
+    """Send deduplicated reminder summaries for every connected account."""
+    for email in list_user_emails():
+        try:
+            service = _service_for_user(email)
+            if service is not None:
+                send_user_reminders(service, email)
+        except Exception:  # noqa: BLE001 - one mailbox must not stop the job
+            logger.exception("Reminder run failed for %s.", email)
 
 
 @app.post("/api/gmail/push")

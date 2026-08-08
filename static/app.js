@@ -553,6 +553,8 @@ function renderPriority(items) {
       const url = escapeHtml(it.gmail_url || "#");
       const score = Math.max(0, Math.min(100, Number(it.score) || 0));
       const senderAttr = escapeHtml(it.sender || "");
+      const subjectAttr = escapeHtml(it.subject || "");
+      const categoryAttr = escapeHtml(it.category || "");
       const options = currentCategories
         .filter((c) => c)
         .map((c) => {
@@ -562,7 +564,7 @@ function renderPriority(items) {
         })
         .join("");
       return `
-        <div class="priority-row" data-sender="${senderAttr}">
+        <div class="priority-row" data-sender="${senderAttr}" data-subject="${subjectAttr}" data-category="${categoryAttr}">
           <span class="priority-score" title="Priority score">${score}</span>
           <span class="priority-main">
             <a class="priority-subject" href="${url}" target="_blank" rel="noopener">${subject}</a>
@@ -579,13 +581,13 @@ function renderPriority(items) {
 
 // Relabeling a priority row teaches the backend: the sender is forced into the
 // chosen category (POST /api/feedback), so future mail from them sorts that way.
-async function relabelPrioritySender(sender, category) {
+async function relabelPrioritySender(sender, subject, oldCategory, category) {
   if (!sender || !category) return;
   try {
     await fetch("/api/feedback", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sender, category }),
+      body: JSON.stringify({ sender, subject, old_category: oldCategory, category }),
     });
     loadLearnedRules();
   } catch (err) {
@@ -599,7 +601,10 @@ if (priorityListEl) {
     if (!select.classList || !select.classList.contains("priority-relabel")) return;
     const row = select.closest(".priority-row");
     const sender = row ? row.getAttribute("data-sender") : "";
-    relabelPrioritySender(sender, select.value);
+    const subject = row ? row.getAttribute("data-subject") : "";
+    const oldCategory = row ? row.getAttribute("data-category") : "";
+    relabelPrioritySender(sender, subject, oldCategory, select.value);
+    if (row) row.setAttribute("data-category", select.value);
   });
 }
 

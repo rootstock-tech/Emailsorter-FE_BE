@@ -10,14 +10,16 @@ from app.db import (
     DEFAULT_CATEGORIES,
     DEFAULT_FAQ_CATEGORY,
     get_active_rules,
+    get_conversation,
     is_known_contact,
     record_triage_action,
     remember_contact,
+    remember_conversation,
     save_deadline,
     save_email_embedding,
     save_priority,
 )
-from app.deadlines import extract_deadline
+from app.deadlines import extract_deadline, extract_deadline_with_llm
 from app.gmail_client import PROCESSED_LABEL, authenticate, fetch_unread_emails, thread_has_user_reply
 from app.labeler import apply_label, get_or_create_label
 from app.priority import compute_priority
@@ -130,7 +132,32 @@ def triage(service, max_results=200, categories=None, faq_category=None, categor
     # Gmail lookup, keeping the extra API calls to a minimum.
     conversation_target = _conversation_target(list(categories))
     for i, (email, category) in enumerate(zip(emails, classified)):
+        conversation = (
+            get_conversation(user_email, email.get("thread_id"))
+            if user_email
+            else None
+        )
+        previous_category = (conversation or {}).get("last_category")
+        if (
+            email.get("is_reply")
+            and previous_category in categories
+            and not _is_spammy(previous_category)
+        ):
+            classified[i] = previous_category
+            category = previous_category
+        if email.get("is_reply") and user_email:
+            remember_conversation(
+                user_email,
+                email.get("thread_id"),
+                email.get("sender"),
+                status="active",
+                category=category,
+            )
+            remember_contact(user_email, email.get("sender"), reason="reply in an active thread")
         if not _is_spammy(category):
+            continue
+        if conversation and conversation.get("status") == "active":
+            classified[i] = conversation_target
             continue
         sender = email.get("sender")
         # Remembered contact -> never spam, and no Gmail call needed.
@@ -224,6 +251,18 @@ def triage(service, max_results=200, categories=None, faq_category=None, categor
         counts[category] += 1
         processed_in_chunk += 1
 
+        if user_email and email.get("thread_id"):
+            try:
+                remember_conversation(
+                    user_email,
+                    email.get("thread_id"),
+                    email.get("sender"),
+                    status="active" if email.get("is_reply") else "observed",
+                    category=category,
+                )
+            except Exception as exc:  # noqa: BLE001 - conversation memory is best-effort
+                logger.warning("Could not remember conversation for %s: %s", message_id, exc)
+
         # Labeling is the second half of each email's work unit. Report as soon
         # as the email is labeled, before the slower draft/embedding steps.
         if progress_cb is not None:
@@ -259,6 +298,8 @@ def triage(service, max_results=200, categories=None, faq_category=None, categor
         if user_email:
             try:
                 due_date, description = extract_deadline(email)
+                if due_date is None:
+                    due_date, description = extract_deadline_with_llm(email)
                 if due_date:
                     save_deadline(
                         user_email,

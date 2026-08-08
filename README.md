@@ -22,13 +22,18 @@ without giving an AI the ability to send mail on their behalf.
   than being dropped.
 - **Adaptive learning.** Repeated specific LLM decisions become transparent
   sender/domain rules after three consistent observations. A manual correction
-  is trusted immediately. `Others` is deliberately never auto-learned, so later
-  mail can still be reconsidered and move into a more specific category.
+  is trusted immediately and stores subject keywords, old/new category, weight,
+  and recency. Weighted sender/domain/keyword evidence runs before the LLM, and
+  past corrections are included in its prompt. `Others` is deliberately never
+  auto-learned, so later mail can still be reconsidered.
 - **Conversation-aware spam protection.** Senders the user has replied to are
   remembered as known contacts and are never left in a spam/newsletter bucket.
 - **Priority, alerts, and deadlines.** Deterministic scoring lifts urgent mail
   and replies; unread red-flag/action mail is pinned in the Gmail add-on; explicit
-  due dates are extracted and shown soonest first.
+  due dates are extracted and shown soonest first. A validated structured Groq
+  fallback resolves relative deadlines that deterministic parsing cannot.
+- **Reminder emails.** An opt-in scheduler sends deduplicated summaries for
+  unread high-priority mail older than 24 hours and deadlines due within 7 days.
 - **One-click summaries.** When a Gmail message is open, the add-on can send its
   subject/body to the backend and display a short Groq-generated bullet summary.
 - **Customizable categories.** Each user defines their own category list and
@@ -129,6 +134,7 @@ Then edit `.env`:
 | `OAUTH_REDIRECT_URI` | OAuth callback URL; set this to the public HTTPS callback when deployed.                                  |
 | `APP_DB_PATH` | SQLite path; set it inside a persistent mounted volume in production.                                         |
 | `HOST` / `PORT` | Bind address and port. Hosted deployments normally use `0.0.0.0` and the platform-provided port.              |
+| `REMINDER_EMAILS_ENABLED` | Set `true` to enable automatic self-reminder emails every three hours.                            |
 
 ### 3. Google Cloud Console setup
 

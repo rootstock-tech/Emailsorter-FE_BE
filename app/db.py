@@ -21,6 +21,7 @@ column-level encryption).
 
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -209,11 +210,46 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reminder_state (
+                user_email TEXT,
+                gmail_id TEXT,
+                reminder_kind TEXT,
+                reminded_at TEXT,
+                reminder_count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_email, gmail_id, reminder_kind)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversations (
+                user_email TEXT,
+                thread_id TEXT,
+                participant TEXT,
+                status TEXT NOT NULL DEFAULT 'observed',
+                last_category TEXT,
+                last_interaction TEXT,
+                PRIMARY KEY (user_email, thread_id)
+            )
+            """
+        )
         # Catch-all decisions must remain eligible for later reclassification.
         conn.execute(
             "UPDATE learned_rules SET active = 0 WHERE lower(category) = lower(?)",
             (FIXED_CATEGORY,),
         )
+        learned_cols = [r[1] for r in conn.execute("PRAGMA table_info(learned_rules)")]
+        for column, definition in (
+            ("keyword_signature", "TEXT"),
+            ("forced_category", "TEXT"),
+            ("old_category", "TEXT"),
+            ("weight", "REAL NOT NULL DEFAULT 1"),
+            ("updated_at", "TEXT"),
+        ):
+            if column not in learned_cols:
+                conn.execute(f"ALTER TABLE learned_rules ADD COLUMN {column} {definition}")
         # Older databases predate per-category prompts; add the column on upgrade.
         existing_cols = [r[1] for r in conn.execute("PRAGMA table_info(user_settings)")]
         if "category_prompts_json" not in existing_cols:
@@ -465,6 +501,18 @@ def _sender_domain(address):
     return address.split("@", 1)[1].strip()
 
 
+_SIGNATURE_STOP_WORDS = {
+    "about", "after", "before", "from", "have", "into", "mail", "please",
+    "re", "regarding", "that", "the", "this", "with", "your",
+}
+
+
+def _keyword_signature(subject):
+    words = re.findall(r"[a-z0-9]{3,}", (subject or "").lower())
+    useful = sorted({word for word in words if word not in _SIGNATURE_STOP_WORDS})
+    return " ".join(useful[:8])
+
+
 def record_llm_decision(user_email, raw_sender, category, threshold=LEARNED_RULE_THRESHOLD):
     """Record one LLM classification as a learning observation.
 
@@ -520,7 +568,7 @@ def record_llm_decision(user_email, raw_sender, category, threshold=LEARNED_RULE
         conn.close()
 
 
-def record_user_correction(user_email, raw_sender, category):
+def record_user_correction(user_email, raw_sender, category, subject="", old_category=None):
     """Record a manual relabel as an immediate, authoritative learned rule.
 
     Unlike record_llm_decision (which needs repeated agreement to promote a
@@ -535,6 +583,7 @@ def record_user_correction(user_email, raw_sender, category):
         return
     domain = _sender_domain(address)
     updated_at = datetime.now(timezone.utc).isoformat()
+    signature = _keyword_signature(subject)
 
     conn = _connect()
     try:
@@ -547,9 +596,23 @@ def record_user_correction(user_email, raw_sender, category):
             ON CONFLICT(user_email, match_type, match_value, category) DO UPDATE SET
                 hits = hits + ?,
                 last_seen = excluded.last_seen,
-                active = 1
+                active = 1,
+                keyword_signature = excluded.keyword_signature,
+                forced_category = excluded.forced_category,
+                old_category = excluded.old_category,
+                weight = learned_rules.weight + 3,
+                updated_at = excluded.updated_at
             """,
             (user_email, address, category, LEARNED_RULE_THRESHOLD, updated_at, LEARNED_RULE_THRESHOLD),
+        )
+        conn.execute(
+            """
+            UPDATE learned_rules
+            SET keyword_signature = ?, forced_category = ?, old_category = ?,
+                weight = MAX(weight, 3), updated_at = ?
+            WHERE user_email = ? AND match_type = 'sender' AND match_value = ? AND category = ?
+            """,
+            (signature, category, old_category, updated_at, user_email, address, category),
         )
         # Only one active rule per sender: turn off any other category.
         conn.execute(
@@ -564,9 +627,23 @@ def record_user_correction(user_email, raw_sender, category):
                 VALUES (?, 'domain', ?, ?, 1, ?, 0)
                 ON CONFLICT(user_email, match_type, match_value, category) DO UPDATE SET
                     hits = hits + 1,
-                    last_seen = excluded.last_seen
+                    last_seen = excluded.last_seen,
+                    keyword_signature = excluded.keyword_signature,
+                    forced_category = excluded.forced_category,
+                    old_category = excluded.old_category,
+                    weight = learned_rules.weight + 1,
+                    updated_at = excluded.updated_at
                 """,
                 (user_email, domain, category, updated_at),
+            )
+            conn.execute(
+                """
+                UPDATE learned_rules
+                SET keyword_signature = ?, forced_category = ?, old_category = ?,
+                    weight = MAX(weight, 1), updated_at = ?
+                WHERE user_email = ? AND match_type = 'domain' AND match_value = ? AND category = ?
+                """,
+                (signature, category, old_category, updated_at, user_email, domain, category),
             )
         conn.commit()
     finally:
@@ -578,11 +655,21 @@ def get_active_rules(user_email):
 
     Shape: {"sender": {address: category}, "domain": {domain: category}}.
     """
-    result = {"sender": {}, "domain": {}}
+    result = {"sender": {}, "domain": {}, "weighted": [], "context": []}
     conn = _connect()
     try:
         rows = conn.execute(
             "SELECT match_type, match_value, category FROM learned_rules WHERE user_email = ? AND active = 1",
+            (user_email,),
+        ).fetchall()
+        weighted = conn.execute(
+            """
+            SELECT match_type, match_value, category, keyword_signature, weight, updated_at
+            FROM learned_rules
+            WHERE user_email = ? AND forced_category IS NOT NULL
+            ORDER BY weight DESC, updated_at DESC
+            LIMIT 50
+            """,
             (user_email,),
         ).fetchall()
     finally:
@@ -590,7 +677,59 @@ def get_active_rules(user_email):
     for match_type, match_value, category in rows:
         if match_type in result:
             result[match_type][match_value] = category
+    for match_type, match_value, category, signature, weight, updated_at in weighted:
+        result["weighted"].append(
+            {
+                "match_type": match_type,
+                "match_value": match_value,
+                "category": category,
+                "keyword_signature": signature or "",
+                "weight": float(weight or 1),
+                "updated_at": updated_at,
+            }
+        )
+        if len(result["context"]) < 12:
+            result["context"].append(
+                f"The user corrected {match_type} {match_value} to {category}"
+                + (f" for subjects about {signature}" if signature else "")
+            )
     return result
+
+
+def match_weighted_rule(active_rules, email, minimum_score=40):
+    """Return a correction category when sender/domain/subject evidence is strong."""
+    address = _sender_address(email.get("sender"))
+    if not address:
+        return None
+    domain = _sender_domain(address)
+    subject_words = set(_keyword_signature(email.get("subject")).split())
+    now = datetime.now(timezone.utc)
+    scores = {}
+    for rule in active_rules.get("weighted", []):
+        value = rule.get("match_value")
+        match_type = rule.get("match_type")
+        if match_type == "sender" and value != address:
+            continue
+        if match_type == "domain" and value != domain:
+            continue
+        weight = max(1.0, float(rule.get("weight") or 1))
+        score = (100 if match_type == "sender" else 20) * weight
+        signature = set((rule.get("keyword_signature") or "").split())
+        if signature and subject_words:
+            score += 30 * weight * len(signature & subject_words) / len(signature)
+        try:
+            age_days = max(0, (now - datetime.fromisoformat(rule["updated_at"])).days)
+            score += max(0, 10 - age_days / 30)
+        except (KeyError, TypeError, ValueError):
+            pass
+        category = rule.get("category")
+        scores[category] = scores.get(category, 0) + score
+    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    if not ranked or ranked[0][1] < minimum_score:
+        return None
+    if len(ranked) > 1 and ranked[0][1] - ranked[1][1] < 15:
+        return None
+    return ranked[0][0]
 
 
 def match_learned_rule(active_rules, raw_sender):
@@ -629,6 +768,132 @@ def list_learned_rules(user_email):
         }
         for r in rows
     ]
+
+
+def reminder_due(user_email, gmail_id, reminder_kind, min_hours=24, max_count=3, now=None):
+    """Return True when a reminder has not been sent too recently/often."""
+    now = now or datetime.now(timezone.utc)
+    conn = _connect()
+    try:
+        row = conn.execute(
+            """
+            SELECT reminded_at, reminder_count FROM reminder_state
+            WHERE user_email = ? AND gmail_id = ? AND reminder_kind = ?
+            """,
+            (user_email, gmail_id, reminder_kind),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return True
+    reminded_at, count = row
+    if int(count or 0) >= max_count:
+        return False
+    try:
+        previous = datetime.fromisoformat(reminded_at)
+    except (TypeError, ValueError):
+        return True
+    return (now - previous).total_seconds() >= min_hours * 3600
+
+
+def mark_reminded(user_email, gmail_id, reminder_kind, now=None):
+    """Record a successfully sent reminder and increment its count."""
+    reminded_at = (now or datetime.now(timezone.utc)).isoformat()
+    conn = _connect()
+    try:
+        conn.execute(
+            """
+            INSERT INTO reminder_state
+                (user_email, gmail_id, reminder_kind, reminded_at, reminder_count)
+            VALUES (?, ?, ?, ?, 1)
+            ON CONFLICT(user_email, gmail_id, reminder_kind) DO UPDATE SET
+                reminded_at = excluded.reminded_at,
+                reminder_count = reminder_state.reminder_count + 1
+            """,
+            (user_email, gmail_id, reminder_kind, reminded_at),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_reminder_state(user_email, gmail_id, reminder_kind):
+    """Return reminder metadata for tests/status, or None when never sent."""
+    conn = _connect()
+    try:
+        row = conn.execute(
+            """
+            SELECT reminded_at, reminder_count FROM reminder_state
+            WHERE user_email = ? AND gmail_id = ? AND reminder_kind = ?
+            """,
+            (user_email, gmail_id, reminder_kind),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    return {"reminded_at": row[0], "reminder_count": int(row[1])}
+
+
+def remember_conversation(
+    user_email,
+    thread_id,
+    participant,
+    status="observed",
+    category=None,
+    interacted_at=None,
+):
+    """Upsert thread context while preserving an already-active status."""
+    if not user_email or not thread_id:
+        return
+    address = _sender_address(participant) or (participant or "").strip().lower()
+    timestamp = interacted_at or datetime.now(timezone.utc).isoformat()
+    conn = _connect()
+    try:
+        conn.execute(
+            """
+            INSERT INTO conversations
+                (user_email, thread_id, participant, status, last_category, last_interaction)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_email, thread_id) DO UPDATE SET
+                participant = excluded.participant,
+                status = CASE
+                    WHEN conversations.status = 'active' THEN 'active'
+                    ELSE excluded.status
+                END,
+                last_category = COALESCE(excluded.last_category, conversations.last_category),
+                last_interaction = excluded.last_interaction
+            """,
+            (user_email, thread_id, address, status, category, timestamp),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_conversation(user_email, thread_id):
+    """Return persisted context for one Gmail thread, or None."""
+    if not user_email or not thread_id:
+        return None
+    conn = _connect()
+    try:
+        row = conn.execute(
+            """
+            SELECT participant, status, last_category, last_interaction
+            FROM conversations WHERE user_email = ? AND thread_id = ?
+            """,
+            (user_email, thread_id),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    return {
+        "participant": row[0],
+        "status": row[1],
+        "last_category": row[2],
+        "last_interaction": row[3],
+    }
 
 
 def set_rule_active(user_email, match_type, match_value, category, active):

@@ -6,8 +6,14 @@ next to deadline-ish wording ("due", "deadline", "last date", "by", "before",
 mail clearly states a date, so we never nag the user about a date we guessed.
 """
 
+import json
+import logging
 import re
 from datetime import date, datetime
+
+from app.classifier import GROQ_MODEL, _get_client
+
+logger = logging.getLogger("email_triage.deadlines")
 
 # Words that signal the nearby date is a deadline the user must act on.
 _DEADLINE_CUES = (
@@ -115,3 +121,50 @@ def extract_deadline(email, today=None):
     due = upcoming[0]
     label = subject or "Deadline"
     return due.isoformat(), label[:200]
+
+
+def extract_deadline_with_llm(email, today=None):
+    """Resolve cue-bearing relative/ambiguous deadlines with validated JSON."""
+    today = today or date.today()
+    subject = (email.get("subject") or "").strip()
+    body = email.get("body") or ""
+    if not _has_cue(f"{subject}\n{body}"):
+        return None, None
+    client = _get_client()
+    if client is None:
+        return None, None
+    prompt = (
+        f"Today is {today.isoformat()}. Extract only a real action deadline from "
+        "this email. Resolve relative dates such as tomorrow. Return only JSON: "
+        '{"has_deadline":true|false,"date":"YYYY-MM-DD or null","what":"short description"}.\n'
+        f"Subject: {subject[:300]}\nBody: {body[:2000]}"
+    )
+    try:
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Extract deadlines conservatively. Never invent a date.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0,
+            max_tokens=120,
+        )
+        raw = response.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            raw = raw.strip("`")
+            if raw.lower().startswith("json"):
+                raw = raw[4:]
+        parsed = json.loads(raw)
+        if not parsed.get("has_deadline") or not parsed.get("date"):
+            return None, None
+        due = date.fromisoformat(parsed["date"])
+        if due < today:
+            return None, None
+        description = (parsed.get("what") or subject or "Deadline").strip()[:200]
+        return due.isoformat(), description
+    except Exception:  # noqa: BLE001 - deadline fallback is best-effort
+        logger.warning("LLM deadline extraction failed.", exc_info=True)
+        return None, None

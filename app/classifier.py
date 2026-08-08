@@ -14,7 +14,7 @@ from groq import Groq
 
 from app.config import GROQ_API_KEY
 from app.rules import classify_by_rules
-from app.db import match_learned_rule, record_llm_decision
+from app.db import match_learned_rule, match_weighted_rule, record_llm_decision
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +115,7 @@ def category_definitions():
     return dict(_CATEGORY_HINTS)
 
 
-def _build_system_prompt(categories, category_prompts=None):
+def _build_system_prompt(categories, category_prompts=None, correction_context=None):
     """Build the classifier system prompt from a user's category list.
 
     For each category the description is chosen in order: the user's own prompt
@@ -135,6 +135,12 @@ def _build_system_prompt(categories, category_prompts=None):
         lines.append(f"- {category}: {description}" if description else f"- {category}")
     guidance = "\n".join(lines)
     example = list(categories)[:3] or list(categories)
+    corrections = ""
+    if correction_context:
+        corrections = (
+            "\n\nUser-specific correction memory:\n- "
+            + "\n- ".join(correction_context[:12])
+        )
 
     return (
         "You are an expert email triage assistant. Classify each email into "
@@ -155,7 +161,8 @@ def _build_system_prompt(categories, category_prompts=None):
         "needs to respond or do something personally addressed to them.\n"
         "- Assign a category ONLY when the email genuinely belongs there. If it "
         "does not clearly fit any specific category, choose the most general or "
-        "low-priority one instead of forcing a wrong label.\n\n"
+        "low-priority one instead of forcing a wrong label."
+        f"{corrections}\n\n"
         "You will get a numbered list of emails. Respond with ONLY a JSON array "
         "of category strings -- one per email, in the same order, no extra "
         f"text. Example for {len(example)} emails: {json.dumps(example)}"
@@ -256,7 +263,8 @@ def classify_emails(emails, categories=None, default_category=None, faq_category
         default_category = _pick_default_category(categories)
 
     valid_categories = set(categories)
-    system_prompt = _build_system_prompt(categories, category_prompts)
+    correction_context = learned_rules.get("context", []) if learned_rules else []
+    system_prompt = _build_system_prompt(categories, category_prompts, correction_context)
 
     classified = [None] * len(emails)
     pending_indices = []
@@ -273,6 +281,10 @@ def classify_emails(emails, categories=None, default_category=None, faq_category
                 and learned != default_category
             ):
                 rule_category = learned
+        if rule_category is None and learned_rules:
+            weighted = match_weighted_rule(learned_rules, email)
+            if weighted in valid_categories and weighted != default_category:
+                rule_category = weighted
         if rule_category is not None:
             classified[i] = rule_category
         else:

@@ -54,6 +54,12 @@ PUSH_AUTH_TOKEN = os.getenv("PUSH_AUTH_TOKEN", "").strip()
 # Must be set (and match the add-on's script property) for /api/addon/* to work.
 ADDON_SHARED_SECRET = os.getenv("ADDON_SHARED_SECRET", "").strip()
 
+REMINDER_EMAILS_ENABLED = os.getenv("REMINDER_EMAILS_ENABLED", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
+
 
 def validate_production_config():
     """Raise with all unsafe production settings before the server starts."""
