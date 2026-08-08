@@ -824,6 +824,23 @@ class DeploymentSafetyTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(json.loads(response.body)["alerts"], expected)
 
+    def test_addon_digest_loads_all_attention_and_deadline_items(self):
+        request = self.Request(query={"email": "user@example.com"})
+        with (
+            patch("app.server._addon_authorized", return_value=True),
+            patch("app.server._addon_verified_email", return_value="user@example.com"),
+            patch("app.server.get_user_token", return_value="token"),
+            patch("app.server.list_learned_rules", return_value=[]),
+            patch("app.server._addon_alert_items", return_value=[]) as alerts,
+            patch("app.server.upcoming_deadlines", return_value=[]) as deadlines,
+            patch("app.server.last_undoable_run", return_value=None),
+        ):
+            response = server.api_addon_digest(request)
+
+        self.assertEqual(response.status_code, 200)
+        alerts.assert_called_once_with("user@example.com", limit=200)
+        deadlines.assert_called_once_with("user@example.com", limit=1000)
+
     def test_addon_message_context_returns_current_category_controls(self):
         request = self.Request(
             query={"email": "user@example.com", "gmail_id": "m1"}
