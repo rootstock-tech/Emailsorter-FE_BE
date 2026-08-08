@@ -151,6 +151,16 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scheduled_triage (
+                email TEXT PRIMARY KEY,
+                run_at TEXT NOT NULL,
+                sort_range TEXT NOT NULL DEFAULT '1d',
+                updated_at TEXT
+            )
+            """
+        )
         # Per-email priority score + reason from the latest run, powering the
         # "Priority inbox" view (most important mail first, with a why).
         conn.execute(
@@ -253,6 +263,15 @@ def init_db():
         conn.execute(
             "UPDATE learned_rules SET active = 0 WHERE lower(category) = lower(?)",
             (FIXED_CATEGORY,),
+        )
+        public_domains = tuple(sorted(PUBLIC_MAIL_DOMAINS))
+        conn.execute(
+            f"""
+            UPDATE learned_rules SET active = 0
+            WHERE match_type = 'domain'
+              AND lower(match_value) IN ({','.join('?' for _ in public_domains)})
+            """,
+            public_domains,
         )
         learned_cols = [r[1] for r in conn.execute("PRAGMA table_info(learned_rules)")]
         for column, definition in (
@@ -403,6 +422,52 @@ def list_auto_triage():
     finally:
         conn.close()
     return [(r[0], r[1]) for r in rows]
+
+
+def save_scheduled_triage(email, run_at, sort_range="1d"):
+    """Persist or replace one future triage schedule for a user."""
+    updated_at = datetime.now(timezone.utc).isoformat()
+    conn = _connect()
+    try:
+        conn.execute(
+            """
+            INSERT INTO scheduled_triage (email, run_at, sort_range, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(email) DO UPDATE SET
+                run_at = excluded.run_at,
+                sort_range = excluded.sort_range,
+                updated_at = excluded.updated_at
+            """,
+            (email, run_at, sort_range, updated_at),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_scheduled_triage(email):
+    """Delete a user's persisted one-time schedule."""
+    conn = _connect()
+    try:
+        conn.execute("DELETE FROM scheduled_triage WHERE email = ?", (email,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_scheduled_triage():
+    """Return persisted one-time schedules as dictionaries."""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT email, run_at, sort_range FROM scheduled_triage"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        {"email": row[0], "run_at": row[1], "range": row[2]}
+        for row in rows
+    ]
 
 
 def save_user_settings(email, categories, faq_category, category_prompts=None):
@@ -703,15 +768,19 @@ def get_active_rules(user_email):
         ).fetchall()
         disabled_senders = conn.execute(
             """
-            SELECT DISTINCT match_value FROM learned_rules
+                        SELECT match_value FROM learned_rules
             WHERE user_email = ? AND match_type = 'sender'
-              AND forced_category IS NOT NULL AND active = 0
+                            AND forced_category IS NOT NULL
+                        GROUP BY match_value
+                        HAVING MAX(active) = 0
             """,
             (user_email,),
         ).fetchall()
     finally:
         conn.close()
     for match_type, match_value, category in rows:
+        if match_type == "domain" and match_value in PUBLIC_MAIL_DOMAINS:
+            continue
         if match_type in result:
             result[match_type][match_value] = category
         if len(result["context"]) < 12:
@@ -721,6 +790,8 @@ def get_active_rules(user_email):
             )
     result["disabled_senders"] = {row[0] for row in disabled_senders}
     for match_type, match_value, category, signature, weight, updated_at in weighted:
+        if match_type == "domain" and match_value in PUBLIC_MAIL_DOMAINS:
+            continue
         result["weighted"].append(
             {
                 "match_type": match_type,

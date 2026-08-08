@@ -85,6 +85,56 @@ class DatabaseRegressionTests(unittest.TestCase):
             )
         )
 
+    def test_latest_manual_correction_remains_active_after_category_change(self):
+        user = "user@example.com"
+        sender = "Billing <billing@acme.com>"
+        db.record_user_correction(
+            user,
+            sender,
+            "Others",
+            subject="Weekly billing digest",
+        )
+        db.record_user_correction(
+            user,
+            sender,
+            "Needs Action",
+            subject="Invoice approval required",
+            old_category="Others",
+        )
+
+        active = db.get_active_rules(user)
+        self.assertNotIn("billing@acme.com", active["disabled_senders"])
+        self.assertEqual(
+            db.match_weighted_rule(
+                active,
+                {
+                    "sender": "billing@acme.com",
+                    "subject": "Invoice approval required today",
+                },
+            ),
+            "Needs Action",
+        )
+
+    def test_legacy_public_domain_rule_is_absent_from_prompt_context(self):
+        user = "user@example.com"
+        conn = db._connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO learned_rules
+                    (user_email, match_type, match_value, category, hits, active)
+                VALUES (?, 'domain', 'gmail.com', 'Spam/Newsletter', 5, 1)
+                """,
+                (user,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        active = db.get_active_rules(user)
+        self.assertNotIn("gmail.com", active["domain"])
+        self.assertFalse(any("gmail.com" in item for item in active["context"]))
+
     def test_disabled_weighted_correction_no_longer_matches(self):
         user = "user@example.com"
         db.record_user_correction(
@@ -221,6 +271,23 @@ class DatabaseRegressionTests(unittest.TestCase):
                 now=datetime(2026, 8, 12, 14, tzinfo=timezone.utc),
             )
         )
+
+    def test_one_time_schedule_persists_and_deletes(self):
+        db.save_scheduled_triage(
+            "user@example.com",
+            "2026-08-09T12:00:00+05:30",
+            "1w",
+        )
+        self.assertEqual(
+            db.list_scheduled_triage(),
+            [{
+                "email": "user@example.com",
+                "run_at": "2026-08-09T12:00:00+05:30",
+                "range": "1w",
+            }],
+        )
+        db.delete_scheduled_triage("user@example.com")
+        self.assertEqual(db.list_scheduled_triage(), [])
 
 
 class ClassifierRegressionTests(unittest.TestCase):
@@ -487,6 +554,8 @@ class AddonContractTests(unittest.TestCase):
             self.assertIn(f"function {function_name}(", code)
         self.assertNotIn("Priority inbox", code)
         self.assertNotIn("digest.top", code)
+        self.assertIn("escapeHtml_(al.subject", code)
+        self.assertIn("escapeHtml_(dl.subject", code)
 
 
 class DeploymentSafetyTests(unittest.TestCase):
@@ -544,6 +613,66 @@ class DeploymentSafetyTests(unittest.TestCase):
             response = asyncio.run(server.api_triage(request, tasks))
         self.assertEqual(response.status_code, 400)
         self.assertEqual(len(tasks.tasks), 0)
+
+    def test_category_settings_reject_case_insensitive_duplicates(self):
+        request = self.Request(
+            session={"user_email": "user@example.com"},
+            body={
+                "categories": ["Needs Action", "needs action", "Others"],
+                "faq_category": None,
+            },
+        )
+        with patch("app.server.get_user_token", return_value="token"):
+            response = asyncio.run(server.api_save_categories(request))
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("unique", json.loads(response.body)["error"])
+
+    def test_busy_scheduled_run_is_retried_instead_of_lost(self):
+        email = "scheduled@example.com"
+        server._progress_by_user[email] = server._default_progress()
+        server._progress_by_user[email]["status"] = "running"
+        server._scheduled_runs_by_user[email] = {
+            "job_id": f"triage-scheduled-{email}",
+            "run_at": "old",
+            "range": "1w",
+        }
+        try:
+            with (
+                patch.object(server.scheduler, "add_job") as add_job,
+                patch("app.server.save_scheduled_triage") as persist,
+            ):
+                server._run_scheduled_triage(email, "1w")
+
+            add_job.assert_called_once()
+            persist.assert_called_once()
+            self.assertEqual(server._scheduled_runs_by_user[email]["range"], "1w")
+            self.assertNotEqual(server._scheduled_runs_by_user[email]["run_at"], "old")
+        finally:
+            server._progress_by_user.pop(email, None)
+            server._scheduled_runs_by_user.pop(email, None)
+
+    def test_persisted_schedule_is_restored_after_restart(self):
+        entry = {
+            "email": "restore@example.com",
+            "run_at": "2099-08-09T12:00:00+05:30",
+            "range": "1w",
+        }
+        try:
+            with (
+                patch("app.server.list_scheduled_triage", return_value=[entry]),
+                patch("app.server.save_scheduled_triage") as persist,
+                patch.object(server.scheduler, "add_job") as add_job,
+            ):
+                server._restore_scheduled_runs()
+
+            add_job.assert_called_once()
+            persist.assert_called_once()
+            self.assertEqual(
+                server._scheduled_runs_by_user[entry["email"]]["range"],
+                "1w",
+            )
+        finally:
+            server._scheduled_runs_by_user.pop(entry["email"], None)
 
     def test_refreshed_web_token_is_persisted(self):
         credentials = SimpleNamespace(
@@ -661,6 +790,79 @@ class DeploymentSafetyTests(unittest.TestCase):
         self.assertEqual(remove.call_args.args[1:], ("m1", "old-label"))
         self.assertEqual(save.call_args.args[5], "Needs Action")
         record.assert_called_once()
+
+    def test_feedback_learns_authoritative_stored_sender_and_subject(self):
+        request = self.Request(
+            session={"user_email": "user@example.com"},
+            body={
+                "gmail_id": "m1",
+                "sender": "forged@attacker.example",
+                "subject": "Forged subject",
+                "category": "Needs Action",
+            },
+        )
+        item = {
+            "gmail_id": "m1",
+            "thread_id": "t1",
+            "sender": "Real Sender <real@example.com>",
+            "subject": "Real invoice approval",
+            "category": "Others",
+            "date": "2026-08-08T08:00:00+00:00",
+        }
+        with (
+            patch("app.server.get_user_token", return_value="token"),
+            patch("app.server.get_user_settings", return_value={"categories": ["Others", "Needs Action"]}),
+            patch("app.server.get_priority_item", return_value=item),
+            patch("app.server._service_for_user", return_value=object()),
+            patch("app.server.get_or_create_label", side_effect=["new-label", "old-label"]),
+            patch("app.server.apply_label"),
+            patch("app.server.remove_label"),
+            patch("app.server.compute_priority", return_value=(78, "corrected")),
+            patch("app.server.save_priority"),
+            patch("app.server.record_user_correction") as record,
+            patch("app.server.remember_contact"),
+            patch("app.server.list_learned_rules", return_value=[]),
+        ):
+            response = asyncio.run(server.api_feedback(request))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(record.call_args.args[1], item["sender"])
+        self.assertEqual(record.call_args.kwargs["subject"], item["subject"])
+
+    def test_feedback_rolls_back_new_label_when_old_label_removal_fails(self):
+        request = self.Request(
+            session={"user_email": "user@example.com"},
+            body={
+                "gmail_id": "m1",
+                "sender": "real@example.com",
+                "category": "Needs Action",
+            },
+        )
+        item = {
+            "gmail_id": "m1",
+            "thread_id": "t1",
+            "sender": "real@example.com",
+            "subject": "Real subject",
+            "category": "Others",
+            "date": "2026-08-08T08:00:00+00:00",
+        }
+        with (
+            patch("app.server.get_user_token", return_value="token"),
+            patch("app.server.get_user_settings", return_value={"categories": ["Others", "Needs Action"]}),
+            patch("app.server.get_priority_item", return_value=item),
+            patch("app.server._service_for_user", return_value=object()),
+            patch("app.server.get_or_create_label", side_effect=["new-label", "old-label"]),
+            patch("app.server.apply_label") as apply,
+            patch("app.server.remove_label", side_effect=[RuntimeError("remove failed"), None]) as remove,
+            patch("app.server.record_user_correction") as record,
+            patch("app.server.logger.exception"),
+        ):
+            response = asyncio.run(server.api_feedback(request))
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(apply.call_args_list[0].args[1:], ("m1", "new-label"))
+        self.assertEqual(remove.call_args_list[-1].args[1:], ("m1", "new-label"))
+        record.assert_not_called()
 
     def test_partial_undo_remains_retryable(self):
         actions = [

@@ -65,6 +65,7 @@ from app.config import (
 )
 from app.db import (
     delete_learned_rule,
+    delete_scheduled_triage,
     delete_priority,
     clear_priority,
     get_auto_triage,
@@ -77,6 +78,7 @@ from app.db import (
     init_db,
     last_undoable_run,
     list_auto_triage,
+    list_scheduled_triage,
     list_known_contacts,
     list_learned_rules,
     list_user_emails,
@@ -84,6 +86,7 @@ from app.db import (
     record_user_correction,
     remember_contact,
     save_priority,
+    save_scheduled_triage,
     save_user_token,
     save_user_settings,
     save_watch_state,
@@ -149,6 +152,7 @@ async def lifespan(_app: FastAPI):
     # Restore recurring auto-triage jobs saved by users across restarts.
     for email, minutes in list_auto_triage():
         _register_recurring(email, minutes)
+    _restore_scheduled_runs()
     try:
         yield
     finally:
@@ -451,16 +455,33 @@ def _run_scheduled_triage(email, sort_range="1d"):
     Re-fetches the user's Gmail service (the token may need refreshing) and runs
     the same triage as a manual run, for the given ``sort_range``.
     """
-    # The job is firing now; clear the pending-schedule record.
-    _scheduled_runs_by_user.pop(email, None)
-
     progress = _progress_by_user.setdefault(email, _default_progress())
     if progress["status"] == "running":
+        retry_at = datetime.now().astimezone() + timedelta(minutes=5)
+        job_id = f"triage-scheduled-{email}"
+        scheduler.add_job(
+            _run_scheduled_triage,
+            trigger="date",
+            run_date=retry_at,
+            args=[email, sort_range],
+            id=job_id,
+            replace_existing=True,
+        )
+        _scheduled_runs_by_user[email] = {
+            "job_id": job_id,
+            "run_at": retry_at.isoformat(),
+            "range": sort_range,
+        }
+        save_scheduled_triage(email, retry_at.isoformat(), sort_range)
         logger.info(
-            "Scheduled run for %s skipped; a run is already in progress.", email
+            "Scheduled run for %s delayed until %s; another run is active.",
+            email,
+            retry_at.isoformat(),
         )
         return
 
+    _scheduled_runs_by_user.pop(email, None)
+    delete_scheduled_triage(email)
     service = _service_for_user(email)
     if service is None:
         logger.warning(
@@ -475,12 +496,49 @@ def _cancel_scheduled_run(email):
     """Remove a user's pending scheduled job. Returns True if one existed."""
     entry = _scheduled_runs_by_user.pop(email, None)
     if not entry:
+        delete_scheduled_triage(email)
         return False
     try:
         scheduler.remove_job(entry["job_id"])
     except JobLookupError:
         pass
+    delete_scheduled_triage(email)
     return True
+
+
+def _restore_scheduled_runs():
+    """Restore persisted one-time schedules after a backend restart."""
+    now = datetime.now().astimezone()
+    for entry in list_scheduled_triage():
+        email = entry["email"]
+        try:
+            run_at = datetime.fromisoformat(entry["run_at"])
+        except (TypeError, ValueError):
+            delete_scheduled_triage(email)
+            continue
+        if run_at.tzinfo is None:
+            run_at = run_at.astimezone()
+        if run_at <= now:
+            run_at = now + timedelta(seconds=10)
+        job_id = f"triage-scheduled-{email}"
+        scheduler.add_job(
+            _run_scheduled_triage,
+            trigger="date",
+            run_date=run_at,
+            args=[email, entry.get("range") or "1d"],
+            id=job_id,
+            replace_existing=True,
+        )
+        _scheduled_runs_by_user[email] = {
+            "job_id": job_id,
+            "run_at": run_at.isoformat(),
+            "range": entry.get("range") or "1d",
+        }
+        save_scheduled_triage(
+            email,
+            run_at.isoformat(),
+            entry.get("range") or "1d",
+        )
 
 
 # Recurring auto-triage: intervals (minutes) users may pick.
@@ -653,7 +711,12 @@ async def api_triage_schedule(request: Request):
         replace_existing=True,
     )
     run_at_iso = run_at.isoformat()
-    _scheduled_runs_by_user[email] = {"job_id": job_id, "run_at": run_at_iso}
+    _scheduled_runs_by_user[email] = {
+        "job_id": job_id,
+        "run_at": run_at_iso,
+        "range": sort_range,
+    }
+    save_scheduled_triage(email, run_at_iso, sort_range)
 
     return JSONResponse({"status": "scheduled", "run_at": run_at_iso})
 
@@ -970,6 +1033,12 @@ async def api_save_categories(request: Request):
             )
         cleaned.append(item.strip())
 
+    normalized = [category.casefold() for category in cleaned]
+    if len(set(normalized)) != len(normalized):
+        return JSONResponse(
+            {"error": "category names must be unique."}, status_code=400
+        )
+
     faq_category = body.get("faq_category")
     if faq_category is not None:
         if not isinstance(faq_category, str) or faq_category.strip() not in cleaned:
@@ -1091,16 +1160,24 @@ async def api_feedback(request: Request):
         item = get_priority_item(email, gmail_id)
         if item is None:
             return JSONResponse({"error": "email is no longer in the priority list."}, status_code=404)
+        sender = item.get("sender") or sender
+        subject = item.get("subject") or subject
         service = _service_for_user(email)
         if service is None:
             return _unauthenticated()
         old_category = item.get("category")
+        new_label_id = None
+        old_label_id = None
+        new_label_applied = False
+        old_label_removed = False
         try:
             new_label_id = get_or_create_label(service, category, account_key=email)
             apply_label(service, gmail_id, new_label_id)
+            new_label_applied = True
             if old_category and old_category != category:
                 old_label_id = get_or_create_label(service, old_category, account_key=email)
                 remove_label(service, gmail_id, old_label_id)
+                old_label_removed = True
             score, reason = compute_priority(
                 {
                     "sender": item.get("sender"),
@@ -1122,6 +1199,13 @@ async def api_feedback(request: Request):
             )
         except Exception:  # noqa: BLE001 - surface relabel failure to the UI
             logger.exception("Could not apply feedback label for %s.", gmail_id)
+            try:
+                if old_label_removed and old_label_id:
+                    apply_label(service, gmail_id, old_label_id)
+                if new_label_applied and new_label_id:
+                    remove_label(service, gmail_id, new_label_id)
+            except Exception:  # noqa: BLE001 - preserve the original failure
+                logger.exception("Could not roll back feedback labels for %s.", gmail_id)
             return JSONResponse({"error": "Could not relabel this email."}, status_code=500)
 
     record_user_correction(

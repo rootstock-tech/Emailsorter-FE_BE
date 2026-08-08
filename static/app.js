@@ -606,6 +606,8 @@ if (priorityListEl) {
   priorityListEl.addEventListener("change", async (event) => {
     const select = event.target;
     if (!select.classList || !select.classList.contains("priority-relabel")) return;
+    if (select.disabled) return;
+    select.disabled = true;
     const row = select.closest(".priority-row");
     const gmailId = row ? row.getAttribute("data-gmail-id") : "";
     const sender = row ? row.getAttribute("data-sender") : "";
@@ -623,6 +625,7 @@ if (priorityListEl) {
     } else {
       select.value = oldCategory;
     }
+    select.disabled = false;
   });
 }
 

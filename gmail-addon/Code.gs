@@ -226,7 +226,7 @@ function buildHomeCard_() {
       for (var key in counts) {
         if (key === 'FAQ (drafted)') continue;
         total += Number(counts[key]) || 0;
-        parts.push(key + ': ' + counts[key]);
+        parts.push(escapeHtml_(key) + ': ' + Number(counts[key] || 0));
       }
       section.addWidget(
         CardService.newDecoratedText()
@@ -271,9 +271,9 @@ function buildHomeCard_() {
       for (var a = 0; a < alerts.length; a++) {
         var al = alerts[a];
         var aw = CardService.newDecoratedText()
-          .setTopLabel(al.category || 'Important')
-          .setText(al.subject || '(no subject)')
-          .setBottomLabel(al.sender || '')
+          .setTopLabel(escapeHtml_(al.category || 'Important'))
+          .setText(escapeHtml_(al.subject || '(no subject)'))
+          .setBottomLabel(escapeHtml_(al.sender || ''))
           .setWrapText(true);
         if (al.gmail_url) {
           aw.setOpenLink(CardService.newOpenLink().setUrl(al.gmail_url));
@@ -289,9 +289,9 @@ function buildHomeCard_() {
       for (var d = 0; d < deadlines.length; d++) {
         var dl = deadlines[d];
         var dw = CardService.newDecoratedText()
-          .setTopLabel('Due ' + (dl.due_date || ''))
-          .setText(dl.subject || dl.description || 'Deadline')
-          .setBottomLabel(dl.sender || '')
+          .setTopLabel('Due ' + escapeHtml_(dl.due_date || ''))
+          .setText(escapeHtml_(dl.subject || dl.description || 'Deadline'))
+          .setBottomLabel(escapeHtml_(dl.sender || ''))
           .setWrapText(true);
         if (dl.gmail_url) {
           dw.setOpenLink(CardService.newOpenLink().setUrl(dl.gmail_url));
