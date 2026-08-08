@@ -327,6 +327,8 @@ function buildHomeCard_() {
   var email = getUserEmail_();
   var status = apiGet_('/api/addon/status?email=' + encodeURIComponent(email));
   var section = CardService.newCardSection();
+  var attentionSection = null;
+  var deadlineButtonSection = null;
 
   if (!status || status.error) {
     section.addWidget(
@@ -436,27 +438,25 @@ function buildHomeCard_() {
 
     var alerts = digest.alerts || [];
     var deadlines = digest.deadlines || [];
-    if (alerts.length || deadlines.length) {
-      var quickLinks = CardService.newButtonSet();
-      if (alerts.length) {
-        quickLinks.addButton(
-          CardService.newTextButton()
-            .setText('Needs your attention (' + alerts.length + ')')
-            .setOnClickAction(
-              CardService.newAction().setFunctionName('openAttentionMails')
-            )
-        );
-      }
-      if (deadlines.length) {
-        quickLinks.addButton(
-          CardService.newTextButton()
-            .setText('Upcoming deadlines (' + deadlines.length + ')')
-            .setOnClickAction(
-              CardService.newAction().setFunctionName('openUpcomingDeadlines')
-            )
-        );
-      }
-      section.addWidget(quickLinks);
+    if (alerts.length) {
+      attentionSection = CardService.newCardSection();
+      attentionSection.addWidget(
+        CardService.newTextButton()
+          .setText('Needs your attention (' + alerts.length + ')')
+          .setOnClickAction(
+            CardService.newAction().setFunctionName('openAttentionMails')
+          )
+      );
+    }
+    if (deadlines.length) {
+      deadlineButtonSection = CardService.newCardSection();
+      deadlineButtonSection.addWidget(
+        CardService.newTextButton()
+          .setText('Upcoming deadlines (' + deadlines.length + ')')
+          .setOnClickAction(
+            CardService.newAction().setFunctionName('openUpcomingDeadlines')
+          )
+      );
     }
   }
 
@@ -483,7 +483,13 @@ function buildHomeCard_() {
 
   var builder = CardService.newCardBuilder()
     .setHeader(CardService.newCardHeader().setTitle('Email Triage Assistant'));
+  if (attentionSection) {
+    builder.addSection(attentionSection);
+  }
   builder.addSection(section);
+  if (deadlineButtonSection) {
+    builder.addSection(deadlineButtonSection);
+  }
   return builder.build();
 }
 
