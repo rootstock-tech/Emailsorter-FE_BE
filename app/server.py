@@ -816,7 +816,7 @@ async def api_addon_auto(request: Request):
 
 @app.get("/api/addon/digest")
 def api_addon_digest(request: Request):
-    """Return a compact summary + top priority mail for a user (add-on)."""
+    """Return add-on counts, unread alerts, deadlines, learning, and undo state."""
     if not _addon_authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     email = request.query_params.get("email")
@@ -826,14 +826,12 @@ def api_addon_digest(request: Request):
     counts = progress["counts"] if progress else None
     rules = list_learned_rules(email)
     active_rules = sum(1 for r in rules if r.get("active"))
-    top = _with_gmail_url(top_priority(email, 3), email)
     alerts = _addon_alert_items(email, limit=3)
     deadlines = _with_gmail_url(upcoming_deadlines(email, limit=3), email)
     run = last_undoable_run(email)
     return JSONResponse(
         {
             "counts": counts,
-            "top": top,
             "alerts": alerts,
             "deadlines": deadlines,
             "learned_active": active_rules,

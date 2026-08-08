@@ -485,6 +485,8 @@ class AddonContractTests(unittest.TestCase):
             "undoRun",
         ):
             self.assertIn(f"function {function_name}(", code)
+        self.assertNotIn("Priority inbox", code)
+        self.assertNotIn("digest.top", code)
 
 
 class DeploymentSafetyTests(unittest.TestCase):

@@ -154,7 +154,6 @@ function buildHomeCard_() {
   var email = getUserEmail_();
   var status = apiGet_('/api/addon/status?email=' + encodeURIComponent(email));
   var section = CardService.newCardSection();
-  var prioritySection = null;
   var alertsSection = null;
   var deadlinesSection = null;
 
@@ -217,7 +216,7 @@ function buildHomeCard_() {
     );
   }
 
-  // Digest + priority + undo, pulled in one call.
+  // Digest, alerts, deadlines, and undo, pulled in one call.
   var digest = apiGet_('/api/addon/digest?email=' + encodeURIComponent(email));
   if (digest && !digest.error) {
     var counts = digest.counts;
@@ -258,24 +257,6 @@ function buildHomeCard_() {
           .setText('Undo last sort (' + digest.undo_count + ')')
           .setOnClickAction(CardService.newAction().setFunctionName('undoRun'))
       );
-    }
-
-    // Top priority mail: most important first, each linked into Gmail.
-    var top = digest.top || [];
-    if (top.length) {
-      prioritySection = CardService.newCardSection().setHeader('Priority inbox');
-      for (var j = 0; j < top.length; j++) {
-        var item = top[j];
-        var widget = CardService.newDecoratedText()
-          .setTopLabel('Score ' + (item.score || 0) + '  \u00b7  ' + (item.category || ''))
-          .setText(item.subject || '(no subject)')
-          .setBottomLabel(item.reason || '')
-          .setWrapText(true);
-        if (item.gmail_url) {
-          widget.setOpenLink(CardService.newOpenLink().setUrl(item.gmail_url));
-        }
-        prioritySection.addWidget(widget);
-      }
     }
 
     // Alerts: unread red-flag / needs-action mail pinned at the very top.
@@ -350,9 +331,6 @@ function buildHomeCard_() {
   builder.addSection(section);
   if (deadlinesSection) {
     builder.addSection(deadlinesSection);
-  }
-  if (prioritySection) {
-    builder.addSection(prioritySection);
   }
   return builder.build();
 }
