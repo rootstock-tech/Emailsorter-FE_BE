@@ -549,6 +549,8 @@ class AddonContractTests(unittest.TestCase):
             "onGmailMessageOpen",
             "summarizeCurrentMessage",
             "saveCategoryCorrection",
+            "openAttentionMails",
+            "openUpcomingDeadlines",
             "runTriage",
             "setAuto",
             "undoRun",
@@ -556,8 +558,9 @@ class AddonContractTests(unittest.TestCase):
             self.assertIn(f"function {function_name}(", code)
         self.assertNotIn("Priority inbox", code)
         self.assertNotIn("digest.top", code)
-        self.assertIn("escapeHtml_(al.subject", code)
-        self.assertIn("escapeHtml_(dl.subject", code)
+        self.assertIn("Needs your attention (' + alerts.length + ')'", code)
+        self.assertIn("Upcoming deadlines (' + deadlines.length + ')'", code)
+        self.assertIn("escapeHtml_(item.subject", code)
         self.assertIn("Connect Gmail", code)
         self.assertIn("/auth/login?return_to=addon", code)
         self.assertIn("/api/addon/message-context", code)

@@ -261,12 +261,72 @@ function connectGmailLink_() {
     .setOnClose(CardService.OnClose.RELOAD_ADD_ON);
 }
 
+function openAttentionMails(e) {
+  var email = getUserEmail_();
+  var digest = apiGet_('/api/addon/digest?email=' + encodeURIComponent(email));
+  var items = digest && !digest.error ? digest.alerts || [] : [];
+  var section = CardService.newCardSection();
+  if (!items.length) {
+    section.addWidget(
+      CardService.newTextParagraph().setText('No unread important mail right now.')
+    );
+  }
+  for (var i = 0; i < items.length; i++) {
+    var item = items[i];
+    var widget = CardService.newDecoratedText()
+      .setTopLabel(escapeHtml_(item.category || 'Important'))
+      .setText(escapeHtml_(item.subject || '(no subject)'))
+      .setBottomLabel(escapeHtml_(item.sender || ''))
+      .setWrapText(true);
+    if (item.gmail_url) {
+      widget.setOpenLink(CardService.newOpenLink().setUrl(item.gmail_url));
+    }
+    section.addWidget(widget);
+  }
+  var card = CardService.newCardBuilder()
+    .setHeader(CardService.newCardHeader().setTitle('Needs your attention (' + items.length + ')'))
+    .addSection(section)
+    .build();
+  return CardService.newActionResponseBuilder()
+    .setNavigation(CardService.newNavigation().pushCard(card))
+    .build();
+}
+
+function openUpcomingDeadlines(e) {
+  var email = getUserEmail_();
+  var digest = apiGet_('/api/addon/digest?email=' + encodeURIComponent(email));
+  var items = digest && !digest.error ? digest.deadlines || [] : [];
+  var section = CardService.newCardSection();
+  if (!items.length) {
+    section.addWidget(
+      CardService.newTextParagraph().setText('No upcoming deadlines right now.')
+    );
+  }
+  for (var i = 0; i < items.length; i++) {
+    var item = items[i];
+    var widget = CardService.newDecoratedText()
+      .setTopLabel('Due ' + escapeHtml_(item.due_date || ''))
+      .setText(escapeHtml_(item.subject || item.description || 'Deadline'))
+      .setBottomLabel(escapeHtml_(item.sender || ''))
+      .setWrapText(true);
+    if (item.gmail_url) {
+      widget.setOpenLink(CardService.newOpenLink().setUrl(item.gmail_url));
+    }
+    section.addWidget(widget);
+  }
+  var card = CardService.newCardBuilder()
+    .setHeader(CardService.newCardHeader().setTitle('Upcoming deadlines (' + items.length + ')'))
+    .addSection(section)
+    .build();
+  return CardService.newActionResponseBuilder()
+    .setNavigation(CardService.newNavigation().pushCard(card))
+    .build();
+}
+
 function buildHomeCard_() {
   var email = getUserEmail_();
   var status = apiGet_('/api/addon/status?email=' + encodeURIComponent(email));
   var section = CardService.newCardSection();
-  var alertsSection = null;
-  var deadlinesSection = null;
 
   if (!status || status.error) {
     section.addWidget(
@@ -374,45 +434,29 @@ function buildHomeCard_() {
       );
     }
 
-    // Alerts: unread red-flag / needs-action mail pinned at the very top.
     var alerts = digest.alerts || [];
-    if (alerts.length) {
-      alertsSection = CardService.newCardSection().setHeader('\u26a0 Needs your attention');
-      alertsSection.addWidget(
-        CardService.newTextParagraph().setText(
-          "You haven't handled these " + alerts.length + ' important mail yet.'
-        )
-      );
-      for (var a = 0; a < alerts.length; a++) {
-        var al = alerts[a];
-        var aw = CardService.newDecoratedText()
-          .setTopLabel(escapeHtml_(al.category || 'Important'))
-          .setText(escapeHtml_(al.subject || '(no subject)'))
-          .setBottomLabel(escapeHtml_(al.sender || ''))
-          .setWrapText(true);
-        if (al.gmail_url) {
-          aw.setOpenLink(CardService.newOpenLink().setUrl(al.gmail_url));
-        }
-        alertsSection.addWidget(aw);
-      }
-    }
-
-    // Deadlines: upcoming due dates pulled from mail.
     var deadlines = digest.deadlines || [];
-    if (deadlines.length) {
-      deadlinesSection = CardService.newCardSection().setHeader('\u23f0 Upcoming deadlines');
-      for (var d = 0; d < deadlines.length; d++) {
-        var dl = deadlines[d];
-        var dw = CardService.newDecoratedText()
-          .setTopLabel('Due ' + escapeHtml_(dl.due_date || ''))
-          .setText(escapeHtml_(dl.subject || dl.description || 'Deadline'))
-          .setBottomLabel(escapeHtml_(dl.sender || ''))
-          .setWrapText(true);
-        if (dl.gmail_url) {
-          dw.setOpenLink(CardService.newOpenLink().setUrl(dl.gmail_url));
-        }
-        deadlinesSection.addWidget(dw);
+    if (alerts.length || deadlines.length) {
+      var quickLinks = CardService.newButtonSet();
+      if (alerts.length) {
+        quickLinks.addButton(
+          CardService.newTextButton()
+            .setText('Needs your attention (' + alerts.length + ')')
+            .setOnClickAction(
+              CardService.newAction().setFunctionName('openAttentionMails')
+            )
+        );
       }
+      if (deadlines.length) {
+        quickLinks.addButton(
+          CardService.newTextButton()
+            .setText('Upcoming deadlines (' + deadlines.length + ')')
+            .setOnClickAction(
+              CardService.newAction().setFunctionName('openUpcomingDeadlines')
+            )
+        );
+      }
+      section.addWidget(quickLinks);
     }
   }
 
@@ -439,14 +483,7 @@ function buildHomeCard_() {
 
   var builder = CardService.newCardBuilder()
     .setHeader(CardService.newCardHeader().setTitle('Email Triage Assistant'));
-  // Alerts pinned above everything else so they are seen first.
-  if (alertsSection) {
-    builder.addSection(alertsSection);
-  }
   builder.addSection(section);
-  if (deadlinesSection) {
-    builder.addSection(deadlinesSection);
-  }
   return builder.build();
 }
 
