@@ -539,6 +539,7 @@ class AddonContractTests(unittest.TestCase):
         triggers = manifest["addOns"]["gmail"]["contextualTriggers"]
 
         self.assertIn("https://www.googleapis.com/auth/gmail.addons.current.message.readonly", scopes)
+        self.assertIn("openid", scopes)
         self.assertEqual(triggers[0]["onTriggerFunction"], "onGmailMessageOpen")
 
     def test_addon_code_contains_all_manifest_and_button_handlers(self):
@@ -547,6 +548,7 @@ class AddonContractTests(unittest.TestCase):
             "onHomepage",
             "onGmailMessageOpen",
             "summarizeCurrentMessage",
+            "saveCategoryCorrection",
             "runTriage",
             "setAuto",
             "undoRun",
@@ -556,14 +558,20 @@ class AddonContractTests(unittest.TestCase):
         self.assertNotIn("digest.top", code)
         self.assertIn("escapeHtml_(al.subject", code)
         self.assertIn("escapeHtml_(dl.subject", code)
+        self.assertIn("Connect Gmail", code)
+        self.assertIn("/auth/login?return_to=addon", code)
+        self.assertIn("/api/addon/message-context", code)
+        self.assertIn("/api/addon/feedback", code)
+        self.assertIn("Save & Teach Assistant", code)
 
 
 class DeploymentSafetyTests(unittest.TestCase):
     class Request:
-        def __init__(self, query=None, session=None, body=None):
+        def __init__(self, query=None, session=None, body=None, headers=None):
             self.query_params = query or {}
             self.session = session or {}
             self._body = body or {}
+            self.headers = headers or {}
 
         async def json(self):
             return self._body
@@ -579,6 +587,69 @@ class DeploymentSafetyTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 307)
                 self.assertEqual(response.headers["location"], "/?auth_error=1")
                 exchange.assert_not_called()
+
+    def test_addon_oauth_callback_returns_to_connected_page(self):
+        request = self.Request(
+            query={"code": "code", "state": "expected"},
+            session={
+                "oauth_state": "expected",
+                "oauth_code_verifier": "verifier",
+                "oauth_return_to": "addon",
+            },
+        )
+        with (
+            patch("app.server.exchange_code", return_value="user@example.com"),
+            patch("app.server._register_watch"),
+        ):
+            response = server.auth_callback(request)
+
+        self.assertEqual(response.status_code, 307)
+        self.assertEqual(response.headers["location"], "/?addon_connected=1")
+
+    def test_addon_identity_token_binds_claimed_email(self):
+        request = self.Request(
+            headers={
+                "x-addon-secret": "secret",
+                "x-addon-identity": "signed-token",
+            }
+        )
+        with (
+            patch("app.server.ADDON_SHARED_SECRET", "secret"),
+            patch("app.server.ADDON_GOOGLE_AUDIENCE", "client-id"),
+            patch(
+                "app.server.google_id_token.verify_oauth2_token",
+                return_value={
+                    "email": "user@example.com",
+                    "email_verified": True,
+                },
+            ) as verify,
+        ):
+            email = server._addon_verified_email(request, "user@example.com")
+
+        self.assertEqual(email, "user@example.com")
+        self.assertEqual(verify.call_args.args[2], "client-id")
+
+    def test_addon_identity_rejects_different_claimed_email(self):
+        request = self.Request(
+            headers={
+                "x-addon-secret": "secret",
+                "x-addon-identity": "signed-token",
+            }
+        )
+        with (
+            patch("app.server.ADDON_SHARED_SECRET", "secret"),
+            patch("app.server.ADDON_GOOGLE_AUDIENCE", "client-id"),
+            patch(
+                "app.server.google_id_token.verify_oauth2_token",
+                return_value={
+                    "email": "real@example.com",
+                    "email_verified": True,
+                },
+            ),
+        ):
+            email = server._addon_verified_email(request, "other@example.com")
+
+        self.assertIsNone(email)
 
     def test_unsafe_production_configuration_fails_fast(self):
         with (
@@ -749,6 +820,57 @@ class DeploymentSafetyTests(unittest.TestCase):
             response = server.api_addon_alerts(request, limit=3)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(json.loads(response.body)["alerts"], expected)
+
+    def test_addon_message_context_returns_current_category_controls(self):
+        request = self.Request(
+            query={"email": "user@example.com", "gmail_id": "m1"}
+        )
+        message = {"subject": "Invoice", "sender": "Alice <alice@example.com>"}
+        settings = {"categories": ["Needs Action", "Others"]}
+        with (
+            patch("app.server._addon_authorized", return_value=True),
+            patch("app.server.get_user_token", return_value="token"),
+            patch(
+                "app.server._addon_message_context",
+                return_value=(object(), message, settings, {}, "Others", None),
+            ),
+        ):
+            response = server.api_addon_message_context(request)
+
+        payload = json.loads(response.body)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["current_category"], "Others")
+        self.assertEqual(payload["categories"], settings["categories"])
+        self.assertEqual(payload["subject"], "Invoice")
+
+    def test_addon_feedback_uses_authoritative_correction_helper(self):
+        request = self.Request(
+            body={
+                "email": "user@example.com",
+                "gmail_id": "m1",
+                "category": "Needs Action",
+            }
+        )
+        result = {
+            "status": "updated",
+            "old_category": "Others",
+            "new_category": "Needs Action",
+            "categories": ["Needs Action", "Others"],
+        }
+        with (
+            patch("app.server._addon_authorized", return_value=True),
+            patch("app.server.get_user_token", return_value="token"),
+            patch("app.server._apply_addon_correction", return_value=result) as apply,
+        ):
+            response = asyncio.run(server.api_addon_feedback(request))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.body), result)
+        apply.assert_called_once_with(
+            "user@example.com",
+            "m1",
+            "Needs Action",
+        )
 
     def test_feedback_relabels_current_email_and_updates_priority(self):
         request = self.Request(

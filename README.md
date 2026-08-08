@@ -131,6 +131,7 @@ Then edit `.env`:
 | `APP_ENV`        | Set to `production` on the hosted service to enable fail-fast security validation.                         |
 | `SESSION_SECRET` | Secret used to sign the web app's session cookies. Set a long random value for anything beyond local use.  |
 | `ADDON_SHARED_SECRET` | Shared secret required by every `/api/addon/*` request. Match the add-on's `ADDON_SECRET`.           |
+| `ADDON_GOOGLE_AUDIENCE` | Standard Cloud project's OAuth client ID; enables signed Apps Script user identity binding.       |
 | `OAUTH_REDIRECT_URI` | OAuth callback URL; set this to the public HTTPS callback when deployed.                                  |
 | `APP_DB_PATH` | SQLite path; set it inside a persistent mounted volume in production.                                         |
 | `HOST` / `PORT` | Bind address and port. Hosted deployments normally use `0.0.0.0` and the platform-provided port.              |

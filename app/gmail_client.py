@@ -269,6 +269,7 @@ def fetch_email_by_id(service, gmail_id):
     return {
         "id": message.get("id", gmail_id),
         "thread_id": message.get("threadId", ""),
+        "label_ids": message.get("labelIds", []),
         "sender": _get_header(headers, "From"),
         "subject": _get_header(headers, "Subject"),
         "body": _extract_body(payload),

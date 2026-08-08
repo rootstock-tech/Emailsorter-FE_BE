@@ -53,6 +53,7 @@ PUSH_AUTH_TOKEN = os.getenv("PUSH_AUTH_TOKEN", "").strip()
 # this in the X-Addon-Secret header so the backend trusts its per-user calls.
 # Must be set (and match the add-on's script property) for /api/addon/* to work.
 ADDON_SHARED_SECRET = os.getenv("ADDON_SHARED_SECRET", "").strip()
+ADDON_GOOGLE_AUDIENCE = os.getenv("ADDON_GOOGLE_AUDIENCE", "").strip()
 
 REMINDER_EMAILS_ENABLED = os.getenv("REMINDER_EMAILS_ENABLED", "false").strip().lower() in {
     "1",

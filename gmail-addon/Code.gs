@@ -59,6 +59,14 @@ function parseJson_(res) {
   }
 }
 
+function apiHeaders_() {
+  var cfg = getConfig_();
+  var headers = { 'X-Addon-Secret': cfg.secret };
+  var identityToken = ScriptApp.getIdentityToken();
+  if (identityToken) headers['X-Addon-Identity'] = identityToken;
+  return headers;
+}
+
 function apiGet_(path) {
   var cfg = getConfig_();
   if (!cfg.backendUrl || !cfg.secret) {
@@ -68,7 +76,7 @@ function apiGet_(path) {
     var res = UrlFetchApp.fetch(cfg.backendUrl + path, {
       method: 'get',
       muteHttpExceptions: true,
-      headers: { 'X-Addon-Secret': cfg.secret },
+      headers: apiHeaders_(),
     });
     return parseJson_(res);
   } catch (err) {
@@ -86,7 +94,7 @@ function apiPost_(path, payload) {
       method: 'post',
       contentType: 'application/json',
       muteHttpExceptions: true,
-      headers: { 'X-Addon-Secret': cfg.secret },
+      headers: apiHeaders_(),
       payload: JSON.stringify(payload),
     });
     return parseJson_(res);
@@ -99,25 +107,94 @@ function onHomepage(e) {
   return buildHomeCard_();
 }
 
-// Contextual card shown when a message is open: a single "Summarize" button.
 function onGmailMessageOpen(e) {
+  var messageId = e && e.gmail ? e.gmail.messageId : null;
+  return buildMessageCard_(messageId);
+}
+
+function buildMessageCard_(messageId) {
   var section = CardService.newCardSection();
+  if (!messageId) {
+    section.addWidget(CardService.newTextParagraph().setText('Open an email first.'));
+    return CardService.newCardBuilder()
+      .setHeader(CardService.newCardHeader().setTitle('Email Triage Assistant'))
+      .addSection(section)
+      .build();
+  }
+
+  var email = getUserEmail_();
+  var context = apiGet_(
+    '/api/addon/message-context?email=' +
+      encodeURIComponent(email) +
+      '&gmail_id=' +
+      encodeURIComponent(messageId)
+  );
+  if (!context || context.error) {
+    section.addWidget(
+      CardService.newTextParagraph().setText(
+        escapeHtml_(context && context.error ? context.error : 'Could not load this email.')
+      )
+    );
+    if (context && context.status === 404) {
+      section.addWidget(
+        CardService.newTextButton()
+          .setText('Connect Gmail')
+          .setOpenLink(connectGmailLink_())
+      );
+    }
+    return CardService.newCardBuilder()
+      .setHeader(CardService.newCardHeader().setTitle('Email Triage Assistant'))
+      .addSection(section)
+      .build();
+  }
+
   section.addWidget(
-    CardService.newTextParagraph().setText('Get a quick summary of this email.')
+    CardService.newDecoratedText()
+      .setTopLabel('Current category')
+      .setText(escapeHtml_(context.current_category || 'Not categorized yet'))
+  );
+  var categoryInput = CardService.newSelectionInput()
+    .setType(CardService.SelectionInputType.DROPDOWN)
+    .setFieldName('category')
+    .setTitle('Move to');
+  var categories = context.categories || [];
+  for (var i = 0; i < categories.length; i++) {
+    var category = categories[i];
+    categoryInput.addItem(
+      category,
+      category,
+      category === context.current_category || (!context.current_category && i === 0)
+    );
+  }
+  section.addWidget(categoryInput);
+  section.addWidget(
+    CardService.newTextButton()
+      .setText('Save & Teach Assistant')
+      .setOnClickAction(
+        CardService.newAction()
+          .setFunctionName('saveCategoryCorrection')
+          .setParameters({ gmailId: messageId })
+      )
   );
   section.addWidget(
     CardService.newTextButton()
       .setText('Summarize this email')
-      .setOnClickAction(CardService.newAction().setFunctionName('summarizeCurrentMessage'))
+      .setOnClickAction(
+        CardService.newAction()
+          .setFunctionName('summarizeCurrentMessage')
+          .setParameters({ gmailId: messageId })
+      )
   );
   return CardService.newCardBuilder()
-    .setHeader(CardService.newCardHeader().setTitle('Summarize'))
+    .setHeader(CardService.newCardHeader().setTitle('Email Triage Assistant'))
     .addSection(section)
     .build();
 }
 
 function summarizeCurrentMessage(e) {
-  var messageId = e && e.gmail ? e.gmail.messageId : null;
+  var messageId =
+    (e && e.parameters && e.parameters.gmailId) ||
+    (e && e.gmail ? e.gmail.messageId : null);
   if (!messageId) {
     return notify_('Open an email first, then tap Summarize.');
   }
@@ -144,10 +221,44 @@ function summarizeCurrentMessage(e) {
     .build();
 }
 
+function saveCategoryCorrection(e) {
+  var messageId = e && e.parameters ? e.parameters.gmailId : null;
+  var category = formValue_(e, 'category', '');
+  if (!messageId || !category) {
+    return notify_('Choose a category first.');
+  }
+  var result = apiPost_('/api/addon/feedback', {
+    email: getUserEmail_(),
+    gmail_id: messageId,
+    category: category,
+  });
+  if (!result || result.error) {
+    return notify_(result && result.error ? result.error : 'Could not save this correction.');
+  }
+  return CardService.newActionResponseBuilder()
+    .setNotification(
+      CardService.newNotification().setText(
+        'Moved to ' + result.new_category + '. Similar emails will use this correction.'
+      )
+    )
+    .setNavigation(
+      CardService.newNavigation().updateCard(buildMessageCard_(messageId))
+    )
+    .build();
+}
+
 function notify_(text) {
   return CardService.newActionResponseBuilder()
     .setNotification(CardService.newNotification().setText(text))
     .build();
+}
+
+function connectGmailLink_() {
+  var cfg = getConfig_();
+  return CardService.newOpenLink()
+    .setUrl(cfg.backendUrl + '/auth/login?return_to=addon')
+    .setOpenAs(CardService.OpenAs.FULL_SIZE)
+    .setOnClose(CardService.OnClose.RELOAD_ADD_ON);
 }
 
 function buildHomeCard_() {
@@ -172,9 +283,13 @@ function buildHomeCard_() {
   if (status.connected === false) {
     section.addWidget(
       CardService.newTextParagraph().setText(
-        'This account is not connected yet. Open the web dashboard once, click ' +
-          '"Connect Gmail", then reopen this add-on.'
+        'Connect this Gmail account once to start triage.'
       )
+    );
+    section.addWidget(
+      CardService.newTextButton()
+        .setText('Connect Gmail')
+        .setOpenLink(connectGmailLink_())
     );
     return CardService.newCardBuilder()
       .setHeader(CardService.newCardHeader().setTitle('Email Triage Assistant'))

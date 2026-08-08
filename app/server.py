@@ -49,12 +49,15 @@ from pathlib import Path
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import BackgroundTasks, FastAPI, Request
+from google.auth.transport.requests import Request as GoogleAuthRequest
+from google.oauth2 import id_token as google_id_token
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.concurrency import run_in_threadpool
 
 from app.config import (
+    ADDON_GOOGLE_AUDIENCE,
     ADDON_SHARED_SECRET,
     GMAIL_PUBSUB_TOPIC,
     PUSH_AUTH_TOKEN,
@@ -281,6 +284,8 @@ def auth_login(request: Request):
     auth_url, state, code_verifier = login_url()
     request.session["oauth_state"] = state
     request.session["oauth_code_verifier"] = code_verifier
+    if request.query_params.get("return_to") == "addon":
+        request.session["oauth_return_to"] = "addon"
     return RedirectResponse(auth_url)
 
 
@@ -299,6 +304,7 @@ def auth_callback(request: Request):
     returned_state = request.query_params.get("state")
     expected_state = request.session.pop("oauth_state", None)
     code_verifier = request.session.pop("oauth_code_verifier", None)
+    return_to = request.session.pop("oauth_return_to", None)
 
     if not code or not code_verifier or not expected_state or not returned_state:
         return RedirectResponse("/?auth_error=1")
@@ -315,6 +321,8 @@ def auth_callback(request: Request):
     request.session["user_email"] = email
     # Enable real-time push for this user (best-effort; no-op if push disabled).
     _register_watch(email)
+    if return_to == "addon":
+        return RedirectResponse("/?addon_connected=1")
     return RedirectResponse("/")
 
 
@@ -804,6 +812,32 @@ def _addon_authorized(request):
     return bool(ADDON_SHARED_SECRET) and secret == ADDON_SHARED_SECRET
 
 
+def _addon_verified_email(request, claimed_email):
+    """Bind an add-on request to its signed Google user when configured."""
+    if not _addon_authorized(request) or not claimed_email:
+        return None
+    if not ADDON_GOOGLE_AUDIENCE:
+        return claimed_email
+    token = request.headers.get("x-addon-identity") or ""
+    if not token:
+        return None
+    try:
+        claims = google_id_token.verify_oauth2_token(
+            token,
+            GoogleAuthRequest(),
+            ADDON_GOOGLE_AUDIENCE,
+        )
+    except Exception:  # noqa: BLE001 - invalid identity is unauthorized
+        logger.warning("Rejected invalid add-on identity token.")
+        return None
+    verified_email = claims.get("email")
+    if not verified_email or claims.get("email_verified") is not True:
+        return None
+    if not secrets.compare_digest(verified_email.lower(), claimed_email.lower()):
+        return None
+    return verified_email
+
+
 @app.post("/api/addon/triage")
 async def api_addon_triage(request: Request, background_tasks: BackgroundTasks):
     """Start a triage run for a user, called by the Gmail Add-on."""
@@ -813,7 +847,10 @@ async def api_addon_triage(request: Request, background_tasks: BackgroundTasks):
         body = await request.json()
     except Exception:  # noqa: BLE001
         body = {}
-    email = (body or {}).get("email")
+    claimed_email = (body or {}).get("email")
+    email = _addon_verified_email(request, claimed_email)
+    if claimed_email and email is None:
+        return JSONResponse({"error": "unauthorized user"}, status_code=401)
     if not email or get_user_token(email) is None:
         return JSONResponse({"error": "user not connected"}, status_code=404)
 
@@ -836,9 +873,12 @@ def api_addon_status(request: Request):
     """Return triage status + auto-sort interval for a user (add-on)."""
     if not _addon_authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    email = request.query_params.get("email")
-    if not email:
+    claimed_email = request.query_params.get("email")
+    if not claimed_email:
         return JSONResponse({"error": "email required"}, status_code=400)
+    email = _addon_verified_email(request, claimed_email)
+    if email is None:
+        return JSONResponse({"error": "unauthorized user"}, status_code=401)
     progress = _progress_by_user.get(email) or _default_progress()
     return JSONResponse(
         {
@@ -860,7 +900,10 @@ async def api_addon_auto(request: Request):
         body = await request.json()
     except Exception:  # noqa: BLE001
         body = {}
-    email = (body or {}).get("email")
+    claimed_email = (body or {}).get("email")
+    email = _addon_verified_email(request, claimed_email)
+    if claimed_email and email is None:
+        return JSONResponse({"error": "unauthorized user"}, status_code=401)
     if not email or get_user_token(email) is None:
         return JSONResponse({"error": "user not connected"}, status_code=404)
     minutes = (body or {}).get("interval_minutes")
@@ -884,7 +927,10 @@ def api_addon_digest(request: Request):
     """Return add-on counts, unread alerts, deadlines, learning, and undo state."""
     if not _addon_authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    email = request.query_params.get("email")
+    claimed_email = request.query_params.get("email")
+    email = _addon_verified_email(request, claimed_email)
+    if claimed_email and email is None:
+        return JSONResponse({"error": "unauthorized user"}, status_code=401)
     if not email or get_user_token(email) is None:
         return JSONResponse({"error": "user not connected"}, status_code=404)
     progress = _progress_by_user.get(email)
@@ -923,12 +969,203 @@ def _addon_alert_items(email, limit=3):
     )
 
 
+def _addon_message_context(email, gmail_id):
+    """Return authoritative Gmail metadata and current configured category."""
+    service = _service_for_user(email)
+    if service is None:
+        raise LookupError("user not connected")
+    message = fetch_email_by_id(service, gmail_id)
+    settings = get_user_settings(email)
+    categories = settings["categories"]
+    label_ids = set(message.get("label_ids") or [])
+    category_label_ids = {
+        category: get_or_create_label(service, category, account_key=email)
+        for category in categories
+    }
+    item = get_priority_item(email, gmail_id)
+    current_category = item.get("category") if item else None
+    if current_category not in categories:
+        current_category = next(
+            (
+                category
+                for category, label_id in category_label_ids.items()
+                if label_id in label_ids
+            ),
+            None,
+        )
+    return service, message, settings, category_label_ids, current_category, item
+
+
+def _apply_addon_correction(email, gmail_id, category):
+    """Relabel one Gmail message and teach a content-aware correction."""
+    (
+        service,
+        message,
+        settings,
+        category_label_ids,
+        old_category,
+        item,
+    ) = _addon_message_context(email, gmail_id)
+    if category not in settings["categories"]:
+        raise ValueError("category is not configured")
+
+    label_ids = set(message.get("label_ids") or [])
+    new_label_id = category_label_ids[category]
+    removed_label_ids = []
+    new_label_applied = new_label_id not in label_ids
+    try:
+        if new_label_applied:
+            apply_label(service, gmail_id, new_label_id)
+        for existing_category, label_id in category_label_ids.items():
+            if existing_category != category and label_id in label_ids:
+                remove_label(service, gmail_id, label_id)
+                removed_label_ids.append(label_id)
+
+        score, reason = compute_priority(
+            {
+                "sender": message.get("sender"),
+                "subject": message.get("subject"),
+                "date": item.get("date") if item else "",
+            },
+            category,
+        )
+        save_priority(
+            email,
+            gmail_id,
+            message.get("thread_id"),
+            message.get("sender"),
+            message.get("subject"),
+            category,
+            score,
+            reason,
+            item.get("date") if item else "",
+        )
+        record_user_correction(
+            email,
+            message.get("sender"),
+            category,
+            subject=message.get("subject") or "",
+            old_category=old_category,
+        )
+        if not _is_spam_category(category):
+            remember_contact(
+                email,
+                message.get("sender"),
+                reason="you corrected this sender in the Gmail add-on",
+            )
+    except Exception:
+        try:
+            for label_id in removed_label_ids:
+                apply_label(service, gmail_id, label_id)
+            if new_label_applied:
+                remove_label(service, gmail_id, new_label_id)
+            if item:
+                save_priority(
+                    email,
+                    item.get("gmail_id"),
+                    item.get("thread_id"),
+                    item.get("sender"),
+                    item.get("subject"),
+                    item.get("category"),
+                    item.get("score"),
+                    item.get("reason"),
+                    item.get("date"),
+                )
+        except Exception:  # noqa: BLE001 - preserve original relabel failure
+            logger.exception("Could not roll back add-on correction for %s.", gmail_id)
+        raise
+    return {
+        "status": "updated",
+        "old_category": old_category,
+        "new_category": category,
+        "categories": settings["categories"],
+    }
+
+
+def _is_spam_category(category):
+    name = (category or "").lower()
+    return any(word in name for word in ("spam", "newsletter", "promo", "junk"))
+
+
+@app.get("/api/addon/message-context")
+def api_addon_message_context(request: Request):
+    """Return category controls for the currently open Gmail message."""
+    if not _addon_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    claimed_email = request.query_params.get("email")
+    email = _addon_verified_email(request, claimed_email)
+    gmail_id = request.query_params.get("gmail_id")
+    if claimed_email and email is None:
+        return JSONResponse({"error": "unauthorized user"}, status_code=401)
+    if not email or not gmail_id:
+        return JSONResponse({"error": "email and gmail_id are required"}, status_code=400)
+    if get_user_token(email) is None:
+        return JSONResponse({"error": "user not connected"}, status_code=404)
+    try:
+        _, message, settings, _, current_category, _ = _addon_message_context(
+            email,
+            gmail_id,
+        )
+    except Exception:  # noqa: BLE001 - safe contextual error
+        logger.exception("Could not load add-on context for %s.", gmail_id)
+        return JSONResponse({"error": "message unavailable"}, status_code=404)
+    return JSONResponse(
+        {
+            "gmail_id": gmail_id,
+            "subject": message.get("subject"),
+            "sender": message.get("sender"),
+            "current_category": current_category,
+            "categories": settings["categories"],
+        }
+    )
+
+
+@app.post("/api/addon/feedback")
+async def api_addon_feedback(request: Request):
+    """Relabel the open Gmail message and save a content-aware correction."""
+    if not _addon_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    claimed_email = (body or {}).get("email")
+    email = _addon_verified_email(request, claimed_email)
+    gmail_id = (body or {}).get("gmail_id")
+    category = (body or {}).get("category")
+    if claimed_email and email is None:
+        return JSONResponse({"error": "unauthorized user"}, status_code=401)
+    if not all(isinstance(value, str) and value.strip() for value in (email, gmail_id, category)):
+        return JSONResponse(
+            {"error": "email, gmail_id and category are required"},
+            status_code=400,
+        )
+    if get_user_token(email) is None:
+        return JSONResponse({"error": "user not connected"}, status_code=404)
+    try:
+        result = await run_in_threadpool(
+            _apply_addon_correction,
+            email,
+            gmail_id,
+            category.strip(),
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception:  # noqa: BLE001 - safe add-on error
+        logger.exception("Could not save add-on correction for %s.", gmail_id)
+        return JSONResponse({"error": "Could not save this correction."}, status_code=500)
+    return JSONResponse(result)
+
+
 @app.get("/api/addon/alerts")
 def api_addon_alerts(request: Request, limit: int = 3):
     """Return still-unread Needs Action and Red Flag mail for the add-on."""
     if not _addon_authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    email = request.query_params.get("email")
+    claimed_email = request.query_params.get("email")
+    email = _addon_verified_email(request, claimed_email)
+    if claimed_email and email is None:
+        return JSONResponse({"error": "unauthorized user"}, status_code=401)
     if not email or get_user_token(email) is None:
         return JSONResponse({"error": "user not connected"}, status_code=404)
     return JSONResponse({"alerts": _addon_alert_items(email, max(1, min(limit, 20)))})
@@ -947,7 +1184,10 @@ async def api_addon_summarize(request: Request):
     mail_body = (body or {}).get("body") or ""
     sender = (body or {}).get("sender") or ""
     gmail_id = (body or {}).get("gmail_id")
-    email = (body or {}).get("email")
+    claimed_email = (body or {}).get("email")
+    email = _addon_verified_email(request, claimed_email)
+    if claimed_email and email is None:
+        return JSONResponse({"error": "unauthorized user"}, status_code=401)
     if gmail_id:
         if not email or get_user_token(email) is None:
             return JSONResponse({"error": "user not connected"}, status_code=404)
@@ -979,7 +1219,10 @@ async def api_addon_undo(request: Request):
         body = await request.json()
     except Exception:  # noqa: BLE001
         body = {}
-    email = (body or {}).get("email")
+    claimed_email = (body or {}).get("email")
+    email = _addon_verified_email(request, claimed_email)
+    if claimed_email and email is None:
+        return JSONResponse({"error": "unauthorized user"}, status_code=401)
     if not email or get_user_token(email) is None:
         return JSONResponse({"error": "user not connected"}, status_code=404)
     service = _service_for_user(email)
