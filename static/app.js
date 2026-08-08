@@ -471,7 +471,7 @@ function renderLearnedRules(rules) {
       `<span class="muted"> (${typeLabel}) &rarr; </span>` +
       `<span class="learned-rule-cat">${escapeHtml(rule.category)}</span>` +
       `<span class="muted learned-rule-meta"> · seen ${rule.hits}× · ${
-        rule.active ? "auto-sorting" : "learning"
+        rule.active ? "active guidance" : "learning"
       }</span>`;
     row.appendChild(info);
 
@@ -667,7 +667,7 @@ function renderDigest(data) {
   }
   html += `<div class="digest-line muted">${Number(
     data.learned_active || 0
-  )} of ${Number(data.learned_total || 0)} learned rules are auto-sorting.</div>`;
+  )} of ${Number(data.learned_total || 0)} learned signals are active.</div>`;
   digestBody.innerHTML = html;
 }
 

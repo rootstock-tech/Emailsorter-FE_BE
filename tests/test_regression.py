@@ -65,6 +65,26 @@ class DatabaseRegressionTests(unittest.TestCase):
         self.assertIn("invoice", active["weighted"][0]["keyword_signature"])
         self.assertTrue(active["context"])
 
+    def test_manual_sender_correction_does_not_override_unrelated_subject(self):
+        user = "user@example.com"
+        db.record_user_correction(
+            user,
+            "LinkedIn <messages@linkedin.com>",
+            "Spam/Newsletter",
+            subject="Weekly network digest suggestions",
+        )
+        active = db.get_active_rules(user)
+
+        self.assertIsNone(
+            db.match_weighted_rule(
+                active,
+                {
+                    "sender": "messages@linkedin.com",
+                    "subject": "Security alert: reset your compromised account",
+                },
+            )
+        )
+
     def test_disabled_weighted_correction_no_longer_matches(self):
         user = "user@example.com"
         db.record_user_correction(
@@ -232,6 +252,32 @@ class ClassifierRegressionTests(unittest.TestCase):
         self.assertEqual(result, ["Needs Action"])
         groq.assert_called_once()
         self.assertEqual(observations[0][-1], "Needs Action")
+
+    def test_automatic_spam_rule_does_not_override_important_current_mail(self):
+        emails = [{
+            "sender": "notifications-noreply@linkedin.com",
+            "subject": "Your account was compromised - reset access",
+            "body": "We detected unauthorized access. Secure your account now.",
+        }]
+        active = {
+            "sender": {"notifications-noreply@linkedin.com": "Spam/Newsletter"},
+            "domain": {"linkedin.com": "Spam/Newsletter"},
+            "weighted": [],
+            "context": ["Historically this sender was often Spam/Newsletter"],
+        }
+        with (
+            patch("app.classifier.classify_by_rules", return_value=None),
+            patch("app.classifier._classify_batch_with_groq", return_value=["Red Flag"]) as groq,
+        ):
+            result = classify_emails(
+                emails,
+                categories=["Red Flag", "Spam/Newsletter", "Others"],
+                default_category="Others",
+                learned_rules=active,
+            )
+
+        self.assertEqual(result, ["Red Flag"])
+        groq.assert_called_once()
 
     def test_others_llm_result_is_not_promoted_to_a_rule(self):
         emails = [{"sender": "reports@acme.com", "subject": "Status", "body": "FYI"}]

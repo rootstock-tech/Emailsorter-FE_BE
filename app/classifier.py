@@ -271,16 +271,8 @@ def classify_emails(emails, categories=None, default_category=None, faq_category
 
     for i, email in enumerate(emails):
         rule_category = classify_by_rules(email, categories)
-        # Then try a learned rule (a sender/domain the LLM has consistently sent
-        # to one category before), but only if that category is still in use.
-        if rule_category is None and learned_rules:
-            learned = match_learned_rule(learned_rules, email.get("sender"))
-            if (
-                learned is not None
-                and learned in valid_categories
-                and learned != default_category
-            ):
-                rule_category = learned
+        # Automatic sender/domain observations are prompt context, not hard
+        # overrides: mixed-intent senders can deliver spam and important mail.
         if rule_category is None and learned_rules:
             weighted = match_weighted_rule(learned_rules, email)
             if weighted in valid_categories and weighted != default_category:

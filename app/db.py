@@ -714,6 +714,11 @@ def get_active_rules(user_email):
     for match_type, match_value, category in rows:
         if match_type in result:
             result[match_type][match_value] = category
+        if len(result["context"]) < 12:
+            result["context"].append(
+                f"Historically, {match_type} {match_value} was often {category}; "
+                "use this only as a hint and prioritize the current email's intent"
+            )
     result["disabled_senders"] = {row[0] for row in disabled_senders}
     for match_type, match_value, category, signature, weight, updated_at in weighted:
         result["weighted"].append(
@@ -752,11 +757,16 @@ def match_weighted_rule(active_rules, email, minimum_score=40):
             continue
         if match_type == "domain" and value != domain:
             continue
-        weight = max(1.0, float(rule.get("weight") or 1))
-        score = (100 if match_type == "sender" else 20) * weight
         signature = set((rule.get("keyword_signature") or "").split())
-        if signature and subject_words:
-            score += 30 * weight * len(signature & subject_words) / len(signature)
+        if not signature or not subject_words:
+            continue
+        overlap = len(signature & subject_words) / len(signature)
+        required_overlap = 0.25 if match_type == "sender" else 0.5
+        if overlap < required_overlap:
+            continue
+        weight = max(1.0, float(rule.get("weight") or 1))
+        score = (50 if match_type == "sender" else 15) * weight
+        score += 50 * weight * overlap
         try:
             age_days = max(0, (now - datetime.fromisoformat(rule["updated_at"])).days)
             score += max(0, 10 - age_days / 30)

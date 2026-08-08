@@ -247,7 +247,7 @@ function buildHomeCard_() {
           (digest.learned_active || 0) +
             ' of ' +
             (digest.learned_total || 0) +
-            ' auto-sorting'
+            ' active guidance signals'
         )
     );
 
