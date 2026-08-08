@@ -621,6 +621,47 @@ class DeploymentSafetyTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(json.loads(response.body)["alerts"], expected)
 
+    def test_feedback_relabels_current_email_and_updates_priority(self):
+        request = self.Request(
+            session={"user_email": "user@example.com"},
+            body={
+                "gmail_id": "m1",
+                "sender": "Alice <alice@example.com>",
+                "subject": "Vendor compliance packet update",
+                "old_category": "Others",
+                "category": "Needs Action",
+            },
+        )
+        item = {
+            "gmail_id": "m1",
+            "thread_id": "t1",
+            "sender": "Alice <alice@example.com>",
+            "subject": "Vendor compliance packet update",
+            "category": "Others",
+            "date": "2026-08-08T08:00:00+00:00",
+        }
+        with (
+            patch("app.server.get_user_token", return_value="token"),
+            patch("app.server.get_user_settings", return_value={"categories": ["Others", "Needs Action"]}),
+            patch("app.server.get_priority_item", return_value=item),
+            patch("app.server._service_for_user", return_value=object()),
+            patch("app.server.get_or_create_label", side_effect=["new-label", "old-label"]),
+            patch("app.server.apply_label") as apply,
+            patch("app.server.remove_label") as remove,
+            patch("app.server.compute_priority", return_value=(78, "corrected")),
+            patch("app.server.save_priority") as save,
+            patch("app.server.record_user_correction") as record,
+            patch("app.server.remember_contact"),
+            patch("app.server.list_learned_rules", return_value=[]),
+        ):
+            response = asyncio.run(server.api_feedback(request))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(apply.call_args.args[1:], ("m1", "new-label"))
+        self.assertEqual(remove.call_args.args[1:], ("m1", "old-label"))
+        self.assertEqual(save.call_args.args[5], "Needs Action")
+        record.assert_called_once()
+
     def test_partial_undo_remains_retryable(self):
         actions = [
             {"gmail_id": "ok", "label_id": "label-1"},

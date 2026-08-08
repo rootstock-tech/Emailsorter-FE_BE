@@ -1128,6 +1128,33 @@ def top_priority(user_email, limit=15):
     ]
 
 
+def get_priority_item(user_email, gmail_id):
+    """Return one stored priority row, or None when it is unknown."""
+    conn = _connect()
+    try:
+        row = conn.execute(
+            """
+            SELECT gmail_id, thread_id, sender, subject, category, score, reason, date
+            FROM email_priority WHERE user_email = ? AND gmail_id = ?
+            """,
+            (user_email, gmail_id),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    return {
+        "gmail_id": row[0],
+        "thread_id": row[1],
+        "sender": row[2],
+        "subject": row[3],
+        "category": row[4],
+        "score": row[5],
+        "reason": row[6],
+        "date": row[7],
+    }
+
+
 def clear_priority(user_email):
     """Remove all stored priority rows for a user (called before a fresh run)."""
     conn = _connect()

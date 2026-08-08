@@ -553,6 +553,7 @@ function renderPriority(items) {
       const url = escapeHtml(it.gmail_url || "#");
       const score = Math.max(0, Math.min(100, Number(it.score) || 0));
       const senderAttr = escapeHtml(it.sender || "");
+      const gmailIdAttr = escapeHtml(it.gmail_id || "");
       const subjectAttr = escapeHtml(it.subject || "");
       const categoryAttr = escapeHtml(it.category || "");
       const options = currentCategories
@@ -564,7 +565,7 @@ function renderPriority(items) {
         })
         .join("");
       return `
-        <div class="priority-row" data-sender="${senderAttr}" data-subject="${subjectAttr}" data-category="${categoryAttr}">
+        <div class="priority-row" data-gmail-id="${gmailIdAttr}" data-sender="${senderAttr}" data-subject="${subjectAttr}" data-category="${categoryAttr}">
           <span class="priority-score" title="Priority score">${score}</span>
           <span class="priority-main">
             <a class="priority-subject" href="${url}" target="_blank" rel="noopener">${subject}</a>
@@ -581,13 +582,13 @@ function renderPriority(items) {
 
 // Relabeling a priority row teaches the backend: the sender is forced into the
 // chosen category (POST /api/feedback), so future mail from them sorts that way.
-async function relabelPrioritySender(sender, subject, oldCategory, category) {
+async function relabelPrioritySender(gmailId, sender, subject, oldCategory, category) {
   if (!sender || !category) return false;
   try {
     const res = await fetch("/api/feedback", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sender, subject, old_category: oldCategory, category }),
+      body: JSON.stringify({ gmail_id: gmailId, sender, subject, old_category: oldCategory, category }),
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
@@ -606,10 +607,12 @@ if (priorityListEl) {
     const select = event.target;
     if (!select.classList || !select.classList.contains("priority-relabel")) return;
     const row = select.closest(".priority-row");
+    const gmailId = row ? row.getAttribute("data-gmail-id") : "";
     const sender = row ? row.getAttribute("data-sender") : "";
     const subject = row ? row.getAttribute("data-subject") : "";
     const oldCategory = row ? row.getAttribute("data-category") : "";
     const saved = await relabelPrioritySender(
+      gmailId,
       sender,
       subject,
       oldCategory,

@@ -68,6 +68,7 @@ from app.db import (
     delete_priority,
     clear_priority,
     get_auto_triage,
+    get_priority_item,
     get_run_actions,
     get_user_settings,
     get_user_token,
@@ -95,7 +96,7 @@ from app.db import (
 from app.summarize import summarize_email
 from app.classifier import CLASSIFICATION_SUMMARY, category_definitions
 from app.commands import execute_command, parse_command, preview_command
-from app.labeler import get_or_create_label, remove_label
+from app.labeler import apply_label, get_or_create_label, remove_label
 from app.gmail_client import (
     PROCESSED_LABEL,
     RANGE_DAYS,
@@ -106,6 +107,7 @@ from app.gmail_client import (
     unread_message_ids,
 )
 from app.main import triage_until_empty
+from app.priority import compute_priority
 from app.reminders import send_user_reminders
 from app.search import search_emails
 from app.web_auth import exchange_code, login_url
@@ -1072,6 +1074,7 @@ async def api_feedback(request: Request):
 
     sender = body.get("sender")
     category = body.get("category")
+    gmail_id = body.get("gmail_id")
     subject = body.get("subject") if isinstance(body.get("subject"), str) else ""
     old_category = body.get("old_category")
     if not isinstance(sender, str) or not sender.strip():
@@ -1079,10 +1082,52 @@ async def api_feedback(request: Request):
     if not isinstance(category, str) or not category.strip():
         return JSONResponse({"error": "category is required."}, status_code=400)
 
+    settings = get_user_settings(email)
+    category = category.strip()
+    if category not in settings["categories"]:
+        return JSONResponse({"error": "category is not configured."}, status_code=400)
+
+    if isinstance(gmail_id, str) and gmail_id:
+        item = get_priority_item(email, gmail_id)
+        if item is None:
+            return JSONResponse({"error": "email is no longer in the priority list."}, status_code=404)
+        service = _service_for_user(email)
+        if service is None:
+            return _unauthenticated()
+        old_category = item.get("category")
+        try:
+            new_label_id = get_or_create_label(service, category, account_key=email)
+            apply_label(service, gmail_id, new_label_id)
+            if old_category and old_category != category:
+                old_label_id = get_or_create_label(service, old_category, account_key=email)
+                remove_label(service, gmail_id, old_label_id)
+            score, reason = compute_priority(
+                {
+                    "sender": item.get("sender"),
+                    "subject": item.get("subject"),
+                    "date": item.get("date"),
+                },
+                category,
+            )
+            save_priority(
+                email,
+                gmail_id,
+                item.get("thread_id"),
+                item.get("sender"),
+                item.get("subject"),
+                category,
+                score,
+                reason,
+                item.get("date"),
+            )
+        except Exception:  # noqa: BLE001 - surface relabel failure to the UI
+            logger.exception("Could not apply feedback label for %s.", gmail_id)
+            return JSONResponse({"error": "Could not relabel this email."}, status_code=500)
+
     record_user_correction(
         email,
         sender,
-        category.strip(),
+        category,
         subject=subject,
         old_category=old_category if isinstance(old_category, str) else None,
     )
