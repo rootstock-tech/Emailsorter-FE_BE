@@ -582,29 +582,44 @@ function renderPriority(items) {
 // Relabeling a priority row teaches the backend: the sender is forced into the
 // chosen category (POST /api/feedback), so future mail from them sorts that way.
 async function relabelPrioritySender(sender, subject, oldCategory, category) {
-  if (!sender || !category) return;
+  if (!sender || !category) return false;
   try {
-    await fetch("/api/feedback", {
+    const res = await fetch("/api/feedback", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sender, subject, old_category: oldCategory, category }),
     });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Feedback failed (${res.status})`);
+    }
     loadLearnedRules();
+    return true;
   } catch (err) {
-    // Non-critical: the correction just won't be recorded this time.
+    statusEl.textContent = `Could not save correction: ${err.message}`;
+    return false;
   }
 }
 
 if (priorityListEl) {
-  priorityListEl.addEventListener("change", (event) => {
+  priorityListEl.addEventListener("change", async (event) => {
     const select = event.target;
     if (!select.classList || !select.classList.contains("priority-relabel")) return;
     const row = select.closest(".priority-row");
     const sender = row ? row.getAttribute("data-sender") : "";
     const subject = row ? row.getAttribute("data-subject") : "";
     const oldCategory = row ? row.getAttribute("data-category") : "";
-    relabelPrioritySender(sender, subject, oldCategory, select.value);
-    if (row) row.setAttribute("data-category", select.value);
+    const saved = await relabelPrioritySender(
+      sender,
+      subject,
+      oldCategory,
+      select.value
+    );
+    if (saved && row) {
+      row.setAttribute("data-category", select.value);
+    } else {
+      select.value = oldCategory;
+    }
   });
 }
 

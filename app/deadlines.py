@@ -35,6 +35,20 @@ _DEADLINE_CUES = (
     "no later than",
 )
 
+_RELATIVE_DATE_CUES = (
+    "today",
+    "tomorrow",
+    "day after tomorrow",
+    "next monday",
+    "next tuesday",
+    "next wednesday",
+    "next thursday",
+    "next friday",
+    "next saturday",
+    "next sunday",
+    "next week",
+)
+
 _MONTHS = {
     "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
     "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
@@ -162,6 +176,20 @@ def extract_deadline_with_llm(email, today=None):
             return None, None
         due = date.fromisoformat(parsed["date"])
         if due < today:
+            return None, None
+        source = f"{subject}\n{body}".lower()
+        date_is_explicit = any(
+            token in source
+            for token in (
+                due.isoformat(),
+                due.strftime("%d/%m/%Y"),
+                due.strftime("%d-%m-%Y"),
+                f"{due.day} {due.strftime('%B %Y')}",
+            )
+            if token
+        )
+        date_is_relative = any(cue in source for cue in _RELATIVE_DATE_CUES)
+        if not date_is_explicit and not date_is_relative:
             return None, None
         description = (parsed.get("what") or subject or "Deadline").strip()[:200]
         return due.isoformat(), description

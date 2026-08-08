@@ -29,6 +29,23 @@ function getUserEmail_() {
   return Session.getActiveUser().getEmail() || Session.getEffectiveUser().getEmail();
 }
 
+function escapeHtml_(text) {
+  return String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function formValue_(e, fieldName, fallback) {
+  var inputs = e && e.commonEventObject && e.commonEventObject.formInputs;
+  var values = inputs && inputs[fieldName] && inputs[fieldName].stringInputs;
+  if (values && values.value && values.value.length) return values.value[0];
+  if (e && e.formInput && e.formInput[fieldName]) return e.formInput[fieldName];
+  return fallback;
+}
+
 function parseJson_(res) {
   var status = res.getResponseCode();
   try {
@@ -109,11 +126,15 @@ function summarizeCurrentMessage(e) {
     gmail_id: messageId,
   });
   if (!result || result.error || !result.summary) {
-    return notify_('Could not summarize right now. Try again.');
+    return notify_(result && result.error ? result.error : 'Could not summarize right now. Try again.');
   }
 
   var section = CardService.newCardSection();
-  section.addWidget(CardService.newTextParagraph().setText(result.summary));
+  section.addWidget(
+    CardService.newTextParagraph().setText(
+      escapeHtml_(result.summary).replace(/\n/g, '<br>')
+    )
+  );
   var card = CardService.newCardBuilder()
     .setHeader(CardService.newCardHeader().setTitle('Summary'))
     .addSection(section)
@@ -137,7 +158,19 @@ function buildHomeCard_() {
   var alertsSection = null;
   var deadlinesSection = null;
 
-  if (!status || status.error || status.connected === false) {
+  if (!status || status.error) {
+    section.addWidget(
+      CardService.newTextParagraph().setText(
+        'Setup or backend error: ' + escapeHtml_(status && status.error ? status.error : 'Unknown error')
+      )
+    );
+    return CardService.newCardBuilder()
+      .setHeader(CardService.newCardHeader().setTitle('Email Triage Assistant'))
+      .addSection(section)
+      .build();
+  }
+
+  if (status.connected === false) {
     section.addWidget(
       CardService.newTextParagraph().setText(
         'This account is not connected yet. Open the web dashboard once, click ' +
@@ -326,7 +359,7 @@ function buildHomeCard_() {
 
 function runTriage(e) {
   var email = getUserEmail_();
-  var range = (e && e.formInput && e.formInput.range) || '1d';
+  var range = formValue_(e, 'range', '1d');
   var res = apiPost_('/api/addon/triage', { email: email, range: range });
   var msg =
     res && res.status === 'running'
@@ -348,7 +381,7 @@ function refreshCard(e) {
 
 function setAuto(e) {
   var email = getUserEmail_();
-  var interval = (e && e.formInput && e.formInput.interval) || '';
+  var interval = formValue_(e, 'interval', '');
   var on = interval && interval !== 'off';
   var res = apiPost_('/api/addon/auto', {
     email: email,

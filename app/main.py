@@ -72,6 +72,15 @@ def _conversation_target(categories):
     return categories[-1] if categories else "Needs Action"
 
 
+def _has_user_participation(service, email, conversation, category):
+    """Require persisted or Gmail SENT evidence before trusting a conversation."""
+    if conversation and conversation.get("status") == "active":
+        return True
+    if not email.get("is_reply") and not _is_spammy(category):
+        return False
+    return thread_has_user_reply(service, email.get("thread_id"))
+
+
 def triage(service, max_results=200, categories=None, faq_category=None, category_prompts=None, user_email=None, progress_cb=None, work_offset=0.0, should_cancel=None, sort_range=None, date=None, run_id=None):
     """Fetch unread emails, classify and label each, return counts.
 
@@ -138,14 +147,21 @@ def triage(service, max_results=200, categories=None, faq_category=None, categor
             else None
         )
         previous_category = (conversation or {}).get("last_category")
+        user_participated = _has_user_participation(
+            service,
+            email,
+            conversation,
+            category,
+        )
         if (
             email.get("is_reply")
+            and user_participated
             and previous_category in categories
             and not _is_spammy(previous_category)
         ):
             classified[i] = previous_category
             category = previous_category
-        if email.get("is_reply") and user_email:
+        if email.get("is_reply") and user_email and user_participated:
             remember_conversation(
                 user_email,
                 email.get("thread_id"),

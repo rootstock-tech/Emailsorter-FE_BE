@@ -624,7 +624,7 @@ def record_user_correction(user_email, raw_sender, category, subject="", old_cat
             conn.execute(
                 """
                 INSERT INTO learned_rules (user_email, match_type, match_value, category, hits, last_seen, active)
-                VALUES (?, 'domain', ?, ?, 1, ?, 0)
+                VALUES (?, 'domain', ?, ?, 1, ?, 1)
                 ON CONFLICT(user_email, match_type, match_value, category) DO UPDATE SET
                     hits = hits + 1,
                     last_seen = excluded.last_seen,
@@ -640,7 +640,7 @@ def record_user_correction(user_email, raw_sender, category, subject="", old_cat
                 """
                 UPDATE learned_rules
                 SET keyword_signature = ?, forced_category = ?, old_category = ?,
-                    weight = MAX(weight, 1), updated_at = ?
+                    weight = MAX(weight, 1), updated_at = ?, active = 1
                 WHERE user_email = ? AND match_type = 'domain' AND match_value = ? AND category = ?
                 """,
                 (signature, category, old_category, updated_at, user_email, domain, category),
@@ -655,20 +655,38 @@ def get_active_rules(user_email):
 
     Shape: {"sender": {address: category}, "domain": {domain: category}}.
     """
-    result = {"sender": {}, "domain": {}, "weighted": [], "context": []}
+    result = {
+        "sender": {},
+        "domain": {},
+        "weighted": [],
+        "context": [],
+        "disabled_senders": set(),
+    }
     conn = _connect()
     try:
         rows = conn.execute(
-            "SELECT match_type, match_value, category FROM learned_rules WHERE user_email = ? AND active = 1",
+            """
+            SELECT match_type, match_value, category FROM learned_rules
+            WHERE user_email = ? AND active = 1
+              AND (forced_category IS NULL OR match_type = 'sender')
+            """,
             (user_email,),
         ).fetchall()
         weighted = conn.execute(
             """
             SELECT match_type, match_value, category, keyword_signature, weight, updated_at
             FROM learned_rules
-            WHERE user_email = ? AND forced_category IS NOT NULL
+            WHERE user_email = ? AND forced_category IS NOT NULL AND active = 1
             ORDER BY weight DESC, updated_at DESC
             LIMIT 50
+            """,
+            (user_email,),
+        ).fetchall()
+        disabled_senders = conn.execute(
+            """
+            SELECT DISTINCT match_value FROM learned_rules
+            WHERE user_email = ? AND match_type = 'sender'
+              AND forced_category IS NOT NULL AND active = 0
             """,
             (user_email,),
         ).fetchall()
@@ -677,6 +695,7 @@ def get_active_rules(user_email):
     for match_type, match_value, category in rows:
         if match_type in result:
             result[match_type][match_value] = category
+    result["disabled_senders"] = {row[0] for row in disabled_senders}
     for match_type, match_value, category, signature, weight, updated_at in weighted:
         result["weighted"].append(
             {
@@ -700,6 +719,8 @@ def match_weighted_rule(active_rules, email, minimum_score=40):
     """Return a correction category when sender/domain/subject evidence is strong."""
     address = _sender_address(email.get("sender"))
     if not address:
+        return None
+    if address in active_rules.get("disabled_senders", set()):
         return None
     domain = _sender_domain(address)
     subject_words = set(_keyword_signature(email.get("subject")).split())

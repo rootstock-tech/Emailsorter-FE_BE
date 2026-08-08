@@ -14,7 +14,8 @@ from app import config, db
 from app import server
 from app.classifier import classify_emails
 from app.deadlines import extract_deadline, extract_deadline_with_llm
-from app.gmail_client import authenticate_from_token_json, unread_message_ids
+from app.gmail_client import _unread_query, authenticate_from_token_json, unread_message_ids
+from app.main import _has_user_participation
 from app.priority import compute_priority
 from app.reminders import send_user_reminders
 from app.summarize import summarize_email
@@ -63,6 +64,23 @@ class DatabaseRegressionTests(unittest.TestCase):
         )
         self.assertIn("invoice", active["weighted"][0]["keyword_signature"])
         self.assertTrue(active["context"])
+
+    def test_disabled_weighted_correction_no_longer_matches(self):
+        user = "user@example.com"
+        db.record_user_correction(
+            user,
+            "Billing <billing@acme.com>",
+            "Needs Action",
+            subject="Invoice approval",
+        )
+        db.set_rule_active(user, "sender", "billing@acme.com", "Needs Action", False)
+        active = db.get_active_rules(user)
+        self.assertIsNone(
+            db.match_weighted_rule(
+                active,
+                {"sender": "billing@acme.com", "subject": "Invoice approval"},
+            )
+        )
 
     def test_automatic_others_rule_is_not_recorded(self):
         user = "user@example.com"
@@ -224,6 +242,28 @@ class FeatureRegressionTests(unittest.TestCase):
             )
         self.assertEqual(result, ("2026-08-09", "Submit report"))
 
+    def test_llm_deadline_rejects_ungrounded_date(self):
+        payload = '{"has_deadline":true,"date":"2026-08-20","what":"Invented"}'
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=payload))]
+        )
+        client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **kwargs: response))
+        )
+        with patch("app.deadlines._get_client", return_value=client):
+            result = extract_deadline_with_llm(
+                {"subject": "Please respond before launch", "body": "No date was provided."},
+                today=date(2026, 8, 8),
+            )
+        self.assertEqual(result, (None, None))
+
+    def test_incoming_reply_headers_do_not_imply_user_participation(self):
+        email = {"is_reply": True, "thread_id": "thread-1"}
+        with patch("app.main.thread_has_user_reply", return_value=False):
+            self.assertFalse(
+                _has_user_participation(object(), email, None, "Needs Action")
+            )
+
     def test_reply_gets_priority_boost(self):
         now = format_datetime(datetime.now(timezone.utc))
         normal_score, _ = compute_priority({"sender": "alice@example.com", "date": now}, "Needs Action")
@@ -318,6 +358,26 @@ class FeatureRegressionTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 send_user_reminders(object(), "user@example.com")
         mark.assert_not_called()
+
+    def test_reminder_engine_marks_only_items_in_the_email(self):
+        attention = [
+            {"gmail_id": f"m{i}", "category": "Needs Action", "subject": f"Item {i}"}
+            for i in range(25)
+        ]
+        marked = []
+        with (
+            patch("app.reminders.collect_due_reminders", return_value=(attention, [])),
+            patch("app.reminders.send_reminder_email"),
+            patch("app.reminders.mark_reminded", side_effect=lambda *args, **kwargs: marked.append(args)),
+        ):
+            result = send_user_reminders(object(), "user@example.com")
+        self.assertEqual(result["attention"], 20)
+        self.assertEqual(len(marked), 20)
+        self.assertNotIn("m24", [args[1] for args in marked])
+
+    def test_triage_query_excludes_its_own_reminder_email(self):
+        query = _unread_query("1d", "2026-08-08")
+        self.assertIn('-subject:"Email Triage reminder: items need your attention"', query)
 
 
 class AddonContractTests(unittest.TestCase):
@@ -524,6 +584,23 @@ class DeploymentSafetyTests(unittest.TestCase):
 
         self.assertEqual(restored[0][1], "old")
         self.assertEqual(server._progress_by_user["user@example.com"]["status"], "error")
+
+    def test_successful_triage_preserves_existing_priority_candidates(self):
+        with (
+            patch("app.server.count_unread_unprocessed", return_value=0),
+            patch("app.server.top_priority", return_value=[]),
+            patch("app.server.get_user_settings", return_value={"categories": ["Others"], "faq_category": None}),
+            patch("app.server.start_triage_run"),
+            patch("app.server.clear_priority") as clear,
+            patch("app.server.triage_until_empty", return_value={}),
+        ):
+            server._run_triage("priority-preserve@example.com", object())
+
+        clear.assert_not_called()
+        self.assertEqual(
+            server._progress_by_user["priority-preserve@example.com"]["status"],
+            "done",
+        )
 
 
 if __name__ == "__main__":

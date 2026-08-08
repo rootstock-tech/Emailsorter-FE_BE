@@ -52,6 +52,7 @@ from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.concurrency import run_in_threadpool
 
 from app.config import (
     ADDON_SHARED_SECRET,
@@ -399,12 +400,11 @@ def _run_triage(email, service, sort_range="1d", date=None):
 
     try:
         settings = get_user_settings(email)
-        # Fresh run: start an undoable run record and clear the previous run's
-        # priority list so the dashboard reflects this run's mail.
+        # Preserve prior priority rows so unread 24-hour reminder candidates
+        # survive frequent auto-triage runs; new results upsert by Gmail id.
         run_id = secrets.token_hex(8)
         try:
             start_triage_run(run_id, email)
-            clear_priority(email)
         except Exception:  # noqa: BLE001 - undo/priority are best-effort
             run_id = None
         counts = triage_until_empty(
@@ -892,7 +892,7 @@ async def api_addon_summarize(request: Request):
         if service is None:
             return JSONResponse({"error": "user not connected"}, status_code=404)
         try:
-            message = fetch_email_by_id(service, gmail_id)
+            message = await run_in_threadpool(fetch_email_by_id, service, gmail_id)
         except Exception:  # noqa: BLE001 - return a safe add-on error
             logger.exception("Could not fetch message %s for summarization.", gmail_id)
             return JSONResponse({"error": "message unavailable"}, status_code=404)
@@ -901,7 +901,7 @@ async def api_addon_summarize(request: Request):
         sender = message.get("sender") or ""
     if not subject and not mail_body:
         return JSONResponse({"error": "nothing to summarize"}, status_code=400)
-    summary = summarize_email(subject, mail_body, sender)
+    summary = await run_in_threadpool(summarize_email, subject, mail_body, sender)
     if summary is None:
         return JSONResponse({"error": "summarize unavailable"}, status_code=503)
     return JSONResponse({"summary": summary})

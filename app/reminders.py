@@ -57,18 +57,20 @@ def send_user_reminders(service, user_email, now=None):
     if not attention and not deadlines:
         return {"sent": False, "attention": 0, "deadlines": 0}
 
+    sent_attention = attention[:20]
+    sent_deadlines = deadlines[:20]
     lines = ["Email Triage Assistant reminder", ""]
-    if attention:
+    if sent_attention:
         lines.append("Unread mail needing attention for more than 24 hours:")
-        for item in attention[:20]:
+        for item in sent_attention:
             lines.append(
                 f"- [{item.get('category')}] {item.get('subject') or '(no subject)'} "
                 f"from {item.get('sender') or 'unknown sender'}"
             )
         lines.append("")
-    if deadlines:
+    if sent_deadlines:
         lines.append("Upcoming deadlines in the next 7 days:")
-        for item in deadlines[:20]:
+        for item in sent_deadlines:
             lines.append(
                 f"- Due {item.get('due_date')}: "
                 f"{item.get('subject') or item.get('description') or 'Deadline'}"
@@ -82,13 +84,17 @@ def send_user_reminders(service, user_email, now=None):
         "Email Triage reminder: items need your attention",
         "\n".join(lines),
     )
-    for item in attention:
+    for item in sent_attention:
         mark_reminded(user_email, item.get("gmail_id"), "attention", now=now)
-    for item in deadlines:
+    for item in sent_deadlines:
         mark_reminded(
             user_email,
             item.get("gmail_id"),
             f"deadline:{item.get('due_date')}",
             now=now,
         )
-    return {"sent": True, "attention": len(attention), "deadlines": len(deadlines)}
+    return {
+        "sent": True,
+        "attention": len(sent_attention),
+        "deadlines": len(sent_deadlines),
+    }

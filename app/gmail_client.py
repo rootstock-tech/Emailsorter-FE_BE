@@ -161,7 +161,10 @@ def _unread_query(sort_range=None, date=None):
     string, or today if omitted) and reaches back by ``sort_range`` -- 1 day
     ("1d") or 1 week ("1w"). All matching mail in that window is fetched.
     """
-    query = f'in:inbox -label:"{PROCESSED_LABEL}"'
+    query = (
+        f'in:inbox -label:"{PROCESSED_LABEL}" '
+        '-subject:"Email Triage reminder: items need your attention"'
+    )
     days = RANGE_DAYS.get(sort_range, RANGE_DAYS[DEFAULT_RANGE])
     anchor = None
     if date:
