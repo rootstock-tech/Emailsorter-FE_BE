@@ -103,6 +103,18 @@ function apiPost_(path, payload) {
   }
 }
 
+function authorizeExternalRequest() {
+  var cfg = getConfig_();
+  if (!cfg.backendUrl) {
+    throw new Error('BACKEND_URL is not configured.');
+  }
+  UrlFetchApp.fetch(cfg.backendUrl + '/api/addon/status?email=' + encodeURIComponent(getUserEmail_()), {
+    method: 'get',
+    muteHttpExceptions: true,
+    headers: apiHeaders_(),
+  });
+}
+
 function onHomepage(e) {
   return buildHomeCard_();
 }
