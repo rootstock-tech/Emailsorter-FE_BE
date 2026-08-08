@@ -44,6 +44,20 @@ DEFAULT_FAQ_CATEGORY = "FAQ"
 # promoted to an auto-applied learned rule (so a one-off does not create a rule).
 LEARNED_RULE_THRESHOLD = 3
 
+PUBLIC_MAIL_DOMAINS = {
+    "gmail.com",
+    "googlemail.com",
+    "outlook.com",
+    "hotmail.com",
+    "live.com",
+    "yahoo.com",
+    "yahoo.co.in",
+    "icloud.com",
+    "proton.me",
+    "protonmail.com",
+    "aol.com",
+}
+
 # A category that is always present and cannot be removed by the user: it is the
 # catch-all where emails that do not clearly fit any other category land, which
 # also guarantees the classifier never has to invent a new label.
@@ -501,6 +515,11 @@ def _sender_domain(address):
     return address.split("@", 1)[1].strip()
 
 
+def _learnable_domain(address):
+    domain = _sender_domain(address)
+    return "" if domain in PUBLIC_MAIL_DOMAINS else domain
+
+
 _SIGNATURE_STOP_WORDS = {
     "about", "after", "before", "from", "have", "into", "mail", "please",
     "re", "regarding", "that", "the", "this", "with", "your",
@@ -527,7 +546,7 @@ def record_llm_decision(user_email, raw_sender, category, threshold=LEARNED_RULE
         or str(category).strip().lower() == FIXED_CATEGORY.lower()
     ):
         return
-    domain = _sender_domain(address)
+    domain = _learnable_domain(address)
     updated_at = datetime.now(timezone.utc).isoformat()
 
     targets = [("sender", address)]
@@ -581,7 +600,7 @@ def record_user_correction(user_email, raw_sender, category, subject="", old_cat
     address = _sender_address(raw_sender)
     if not address or not category:
         return
-    domain = _sender_domain(address)
+    domain = _learnable_domain(address)
     updated_at = datetime.now(timezone.utc).isoformat()
     signature = _keyword_signature(subject)
 
@@ -722,7 +741,7 @@ def match_weighted_rule(active_rules, email, minimum_score=40):
         return None
     if address in active_rules.get("disabled_senders", set()):
         return None
-    domain = _sender_domain(address)
+    domain = _learnable_domain(address)
     subject_words = set(_keyword_signature(email.get("subject")).split())
     now = datetime.now(timezone.utc)
     scores = {}
@@ -764,7 +783,7 @@ def match_learned_rule(active_rules, raw_sender):
     sender_cat = active_rules.get("sender", {}).get(address)
     if sender_cat:
         return sender_cat
-    return active_rules.get("domain", {}).get(_sender_domain(address))
+    return active_rules.get("domain", {}).get(_learnable_domain(address))
 
 
 def list_learned_rules(user_email):

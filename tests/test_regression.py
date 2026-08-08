@@ -90,6 +90,28 @@ class DatabaseRegressionTests(unittest.TestCase):
 
         self.assertEqual(db.list_learned_rules(user), [])
 
+    def test_public_mail_provider_never_creates_domain_rule(self):
+        user = "user@example.com"
+        for _ in range(3):
+            db.record_llm_decision(
+                user,
+                "Person <person@gmail.com>",
+                "Needs Action",
+            )
+
+        rules = db.list_learned_rules(user)
+        self.assertTrue(any(rule["match_type"] == "sender" for rule in rules))
+        self.assertFalse(any(rule["match_type"] == "domain" for rule in rules))
+
+    def test_legacy_public_domain_rule_is_ignored(self):
+        active = {
+            "sender": {},
+            "domain": {"gmail.com": "Needs Action"},
+        }
+        self.assertIsNone(
+            db.match_learned_rule(active, "different-person@gmail.com")
+        )
+
     def test_legacy_active_others_rule_is_deactivated_on_upgrade(self):
         user = "user@example.com"
         conn = db._connect()
