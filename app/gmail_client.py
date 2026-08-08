@@ -46,7 +46,7 @@ def authenticate():
     return build("gmail", "v1", credentials=creds)
 
 
-def authenticate_from_token_json(token_json):
+def authenticate_from_token_json(token_json, on_refresh=None):
     """Build a Gmail API service from stored credentials JSON.
 
     Used by the web (multi-user) flow, where each user's token is loaded from
@@ -58,8 +58,26 @@ def authenticate_from_token_json(token_json):
 
     if not creds.valid and creds.expired and creds.refresh_token:
         creds.refresh(Request())
+        if on_refresh is not None:
+            on_refresh(creds.to_json())
 
     return build("gmail", "v1", credentials=creds)
+
+
+def start_watch(service, topic_name, label_ids=None):
+    """Register a Gmail push notification watch for the user's mailbox.
+
+    Google publishes a Pub/Sub message to ``topic_name`` whenever the mailbox
+    changes. Returns the API response, e.g. {'historyId': ..., 'expiration': ...}
+    (expiration is epoch millis). The watch must be renewed before it expires
+    (Google caps it at ~7 days), so callers should re-invoke this periodically.
+    """
+    body = {
+        "topicName": topic_name,
+        "labelIds": label_ids or ["INBOX"],
+        "labelFilterBehavior": "INCLUDE",
+    }
+    return service.users().watch(userId="me", body=body).execute()
 
 
 def _get_header(headers, name):
@@ -158,7 +176,8 @@ def fetch_unread_emails(service, max_results=400, sort_range=None, date=None):
     ``date`` set the window (see _unread_query).
 
     Each dict contains:
-    {id, sender, subject, body, date, message_id_header, thread_id}.
+    {id, sender, subject, body, date, message_id_header, thread_id,
+     in_reply_to, references, is_reply}.
     """
     query = _unread_query(sort_range, date)
     emails = []
@@ -189,6 +208,9 @@ def fetch_unread_emails(service, max_results=400, sort_range=None, date=None):
             payload = message.get("payload", {})
             headers = payload.get("headers", [])
 
+            in_reply_to = _get_header(headers, "In-Reply-To")
+            references = _get_header(headers, "References")
+
             emails.append(
                 {
                     "id": message.get("id", ""),
@@ -198,6 +220,11 @@ def fetch_unread_emails(service, max_results=400, sort_range=None, date=None):
                     "date": _parse_date(_get_header(headers, "Date")),
                     "message_id_header": _get_header(headers, "Message-ID"),
                     "thread_id": message.get("threadId", ""),
+                    "in_reply_to": in_reply_to,
+                    "references": references,
+                    # A mail that references an earlier message is a reply in an
+                    # ongoing thread -- surfaced higher so it does not get buried.
+                    "is_reply": bool(in_reply_to or references),
                 }
             )
 
@@ -209,6 +236,55 @@ def fetch_unread_emails(service, max_results=400, sort_range=None, date=None):
             break
 
     return emails
+
+
+def thread_has_user_reply(service, thread_id):
+    """Return True if the user has sent at least one message in this thread.
+
+    A message the user sent carries the SENT label, so an active back-and-forth
+    is detectable without reading bodies (metadata format only). Used to keep a
+    genuine conversation from ever being filed as spam. Best-effort: returns
+    False on any error or missing thread id.
+    """
+    if not thread_id:
+        return False
+    try:
+        thread = (
+            service.users()
+            .threads()
+            .get(userId="me", id=thread_id, format="metadata")
+            .execute()
+        )
+    except Exception:  # noqa: BLE001 - conversation check is best-effort
+        return False
+    for message in thread.get("messages", []):
+        if "SENT" in (message.get("labelIds") or []):
+            return True
+    return False
+
+
+def unread_message_ids(service, gmail_ids):
+    """Return the subset of ``gmail_ids`` whose message is still marked UNREAD.
+
+    Used to hide alerts the user has already opened. Best-effort: a message that
+    errors or no longer exists is treated as read (dropped from the result).
+    """
+    still_unread = set()
+    for gmail_id in gmail_ids or []:
+        if not gmail_id:
+            continue
+        try:
+            msg = (
+                service.users()
+                .messages()
+                .get(userId="me", id=gmail_id, format="minimal")
+                .execute()
+            )
+        except Exception:  # noqa: BLE001 - read check is best-effort
+            continue
+        if "UNREAD" in (msg.get("labelIds") or []):
+            still_unread.add(gmail_id)
+    return still_unread
 
 
 def count_unread_unprocessed(service, sort_range=None, date=None):

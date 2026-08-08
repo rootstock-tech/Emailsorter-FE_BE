@@ -76,3 +76,17 @@ def apply_label(service, message_id, label_id):
         )
         .execute()
     )
+
+
+def remove_label(service, message_id, label_id):
+    """Remove a label from a message via users().messages().modify()."""
+    return (
+        service.users()
+        .messages()
+        .modify(
+            userId="me",
+            id=message_id,
+            body={"removeLabelIds": [label_id]},
+        )
+        .execute()
+    )

@@ -2,9 +2,6 @@
 
 const authCard = document.getElementById("auth-card");
 const triageCard = document.getElementById("triage-card");
-const resultsCard = document.getElementById("results-card");
-const resultsEl = document.getElementById("results");
-const draftedStatEl = document.getElementById("drafted-stat");
 const runBtn = document.getElementById("run-btn");
 const statusEl = document.getElementById("status");
 const triageProgress = document.getElementById("triage-progress");
@@ -25,6 +22,8 @@ const scheduleAmpm = document.getElementById("schedule-ampm");
 const scheduleBtn = document.getElementById("schedule-btn");
 const scheduledLine = document.getElementById("scheduled-line");
 const scheduledTextEl = document.getElementById("scheduled-text");
+const autoIntervalEl = document.getElementById("auto-interval");
+const autoStatusEl = document.getElementById("auto-status");
 const cancelScheduleLink = document.getElementById("cancel-schedule");
 const openGmailLink = document.getElementById("open-gmail-link");
 const openDraftsLink = document.getElementById("open-drafts-link");
@@ -38,11 +37,30 @@ const addCategoryBtn = document.getElementById("add-category-btn");
 const faqSelect = document.getElementById("faq-select");
 const saveCategoriesBtn = document.getElementById("save-categories-btn");
 const categoriesStatusEl = document.getElementById("categories-status");
+const learnedRulesCard = document.getElementById("learned-rules-card");
+const learnedRulesListEl = document.getElementById("learned-rules-list");
+const learnedRulesEmptyEl = document.getElementById("learned-rules-empty");
 const searchCard = document.getElementById("search-card");
 const searchInput = document.getElementById("search-input");
 const searchBtn = document.getElementById("search-btn");
 const searchResultsEl = document.getElementById("search-results");
 const searchLockMsg = document.getElementById("search-lock-msg");
+const undoRow = document.getElementById("undo-row");
+const undoBtn = document.getElementById("undo-btn");
+const undoStatusEl = document.getElementById("undo-status");
+const digestCard = document.getElementById("digest-card");
+const digestBody = document.getElementById("digest-body");
+const commandCard = document.getElementById("command-card");
+const commandInput = document.getElementById("command-input");
+const commandPreviewBtn = document.getElementById("command-preview-btn");
+const commandPreviewEl = document.getElementById("command-preview");
+const commandActionsEl = document.getElementById("command-actions");
+const commandRunBtn = document.getElementById("command-run-btn");
+const commandCancelBtn = document.getElementById("command-cancel-btn");
+const commandStatusEl = document.getElementById("command-status");
+const priorityCard = document.getElementById("priority-card");
+const priorityListEl = document.getElementById("priority-list");
+const priorityEmptyEl = document.getElementById("priority-empty");
 
 const DRAFTED_KEY = "FAQ (drafted)";
 
@@ -53,6 +71,10 @@ const FIXED_CATEGORY = "Others";
 // The user's working copy of their category list (edited in the Categories
 // card, saved via POST /api/settings/categories).
 let currentCategories = [];
+
+// Parallel to currentCategories: the per-category prompt/description (may be an
+// empty string) describing what belongs in each category.
+let currentPrompts = [];
 
 // Fixed category order so the dashboard layout stays stable between runs.
 const CATEGORY_ORDER = [
@@ -105,8 +127,13 @@ async function init() {
       updateSearchLock();
       loadLabelGuide();
       await loadCategories();
+      loadLearnedRules();
       loadLastSummary();
+      loadPriority();
+      loadDigest();
+      loadUndoStatus();
       await refreshScheduleState();
+      loadAutoTriage();
       startWatchLoop();
     } else {
       showConnect();
@@ -120,20 +147,28 @@ function showConnect() {
   authCard.classList.remove("hidden");
   triageCard.classList.add("hidden");
   categoriesCard.classList.add("hidden");
+  learnedRulesCard.classList.add("hidden");
   searchCard.classList.add("hidden");
   linksCard.classList.add("hidden");
   labelsCard.classList.add("hidden");
   userBox.classList.add("hidden");
+  if (digestCard) digestCard.classList.add("hidden");
+  if (commandCard) commandCard.classList.add("hidden");
+  if (priorityCard) priorityCard.classList.add("hidden");
 }
 
 function showAuthenticated(email) {
   authCard.classList.add("hidden");
   triageCard.classList.remove("hidden");
   categoriesCard.classList.remove("hidden");
+  learnedRulesCard.classList.remove("hidden");
   searchCard.classList.remove("hidden");
   linksCard.classList.remove("hidden");
   labelsCard.classList.remove("hidden");
   userBox.classList.remove("hidden");
+  if (digestCard) digestCard.classList.remove("hidden");
+  if (commandCard) commandCard.classList.remove("hidden");
+  if (priorityCard) priorityCard.classList.remove("hidden");
   userEmailEl.textContent = email || "";
 
   // Populate the schedule time picker and default the dates to today.
@@ -166,10 +201,7 @@ async function loadLastSummary() {
       showConnect();
       return;
     }
-    const { counts } = await res.json();
-    if (counts) {
-      renderCounts(counts);
-    }
+    await res.json();
   } catch (err) {
     // No prior summary is fine; ignore.
   }
@@ -209,6 +241,8 @@ async function loadCategories() {
     currentCategories = Array.isArray(data.categories)
       ? data.categories.slice()
       : [];
+    const prompts = data.category_prompts || {};
+    currentPrompts = currentCategories.map((name) => prompts[name] || "");
     ensureFixedCategory();
     renderCategoryList();
     rebuildFaqSelect(data.faq_category || "");
@@ -221,7 +255,10 @@ function ensureFixedCategory() {
   const has = currentCategories.some(
     (c) => c.trim().toLowerCase() === FIXED_CATEGORY.toLowerCase()
   );
-  if (!has) currentCategories.push(FIXED_CATEGORY);
+  if (!has) {
+    currentCategories.push(FIXED_CATEGORY);
+    currentPrompts.push("");
+  }
 }
 
 function renderCategoryList() {
@@ -233,6 +270,10 @@ function renderCategoryList() {
 
     const isFixed =
       cat.trim().toLowerCase() === FIXED_CATEGORY.toLowerCase();
+
+    // Top line: the category name plus its Remove button / "Always on" badge.
+    const nameLine = document.createElement("div");
+    nameLine.className = "category-name-line";
 
     const input = document.createElement("input");
     input.type = "text";
@@ -250,13 +291,13 @@ function renderCategoryList() {
       });
     }
 
-    row.appendChild(input);
+    nameLine.appendChild(input);
 
     if (isFixed) {
       const badge = document.createElement("span");
       badge.className = "category-fixed muted";
       badge.textContent = "Always on";
-      row.appendChild(badge);
+      nameLine.appendChild(badge);
     } else {
       const removeBtn = document.createElement("button");
       removeBtn.type = "button";
@@ -264,11 +305,28 @@ function renderCategoryList() {
       removeBtn.textContent = "Remove";
       removeBtn.addEventListener("click", () => {
         currentCategories.splice(index, 1);
+        currentPrompts.splice(index, 1);
         renderCategoryList();
         rebuildFaqSelect();
       });
-      row.appendChild(removeBtn);
+      nameLine.appendChild(removeBtn);
     }
+
+    row.appendChild(nameLine);
+
+    // A short prompt describing what belongs in this category. Optional, but it
+    // makes client/user-specific categories classify far more accurately.
+    const prompt = document.createElement("textarea");
+    prompt.className = "category-prompt";
+    prompt.rows = 2;
+    prompt.placeholder = isFixed
+      ? "Catch-all for anything that doesn't fit the categories above."
+      : "Describe what belongs in this category (optional)";
+    prompt.value = currentPrompts[index] || "";
+    prompt.addEventListener("input", () => {
+      currentPrompts[index] = prompt.value;
+    });
+    row.appendChild(prompt);
 
     categoryListEl.appendChild(row);
   });
@@ -304,6 +362,7 @@ function rebuildFaqSelect(selected) {
 
 function addCategory() {
   currentCategories.push("");
+  currentPrompts.push("");
   renderCategoryList();
   rebuildFaqSelect();
 
@@ -312,11 +371,17 @@ function addCategory() {
 }
 
 async function saveCategories() {
-  const inputs = categoryListEl.querySelectorAll(".category-input");
+  const rows = categoryListEl.querySelectorAll(".category-row");
   const cleaned = [];
-  inputs.forEach((input) => {
-    const value = input.value.trim();
-    if (value) cleaned.push(value);
+  const prompts = {};
+  rows.forEach((row) => {
+    const nameEl = row.querySelector(".category-input");
+    const promptEl = row.querySelector(".category-prompt");
+    const name = nameEl ? nameEl.value.trim() : "";
+    if (!name) return;
+    cleaned.push(name);
+    const prompt = promptEl ? promptEl.value.trim() : "";
+    if (prompt) prompts[name] = prompt;
   });
 
   // The fixed catch-all is always saved, even if somehow missing from the UI.
@@ -341,7 +406,11 @@ async function saveCategories() {
     const res = await fetch("/api/settings/categories", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ categories: cleaned, faq_category: faqCategory }),
+      body: JSON.stringify({
+        categories: cleaned,
+        faq_category: faqCategory,
+        category_prompts: prompts,
+      }),
     });
     if (res.status === 401) {
       showConnect();
@@ -355,6 +424,8 @@ async function saveCategories() {
     currentCategories = Array.isArray(data.categories)
       ? data.categories.slice()
       : cleaned;
+    const savedPrompts = data.category_prompts || prompts;
+    currentPrompts = currentCategories.map((name) => savedPrompts[name] || "");
     ensureFixedCategory();
     renderCategoryList();
     rebuildFaqSelect(data.faq_category || "");
@@ -365,6 +436,368 @@ async function saveCategories() {
   } finally {
     saveCategoriesBtn.disabled = false;
   }
+}
+
+// --- Learned rules (self-learning) ---
+
+async function loadLearnedRules() {
+  try {
+    const res = await fetch("/api/rules/learned");
+    if (!res.ok) return;
+    const data = await res.json();
+    renderLearnedRules(data.rules || []);
+  } catch (err) {
+    // Ignore; the section just stays empty.
+  }
+}
+
+function renderLearnedRules(rules) {
+  learnedRulesListEl.innerHTML = "";
+  if (!rules.length) {
+    learnedRulesEmptyEl.classList.remove("hidden");
+    return;
+  }
+  learnedRulesEmptyEl.classList.add("hidden");
+
+  rules.forEach((rule) => {
+    const row = document.createElement("div");
+    row.className = "learned-rule-row" + (rule.active ? " active" : "");
+
+    const info = document.createElement("div");
+    info.className = "learned-rule-info";
+    const typeLabel = rule.match_type === "domain" ? "domain" : "sender";
+    info.innerHTML =
+      `<span class="learned-rule-match">${escapeHtml(rule.match_value)}</span>` +
+      `<span class="muted"> (${typeLabel}) &rarr; </span>` +
+      `<span class="learned-rule-cat">${escapeHtml(rule.category)}</span>` +
+      `<span class="muted learned-rule-meta"> · seen ${rule.hits}× · ${
+        rule.active ? "auto-sorting" : "learning"
+      }</span>`;
+    row.appendChild(info);
+
+    const actions = document.createElement("div");
+    actions.className = "learned-rule-actions";
+
+    const toggleBtn = document.createElement("button");
+    toggleBtn.type = "button";
+    toggleBtn.className = "btn btn-ghost";
+    toggleBtn.textContent = rule.active ? "Turn off" : "Turn on";
+    toggleBtn.addEventListener("click", () =>
+      updateLearnedRule(rule, rule.active ? "disable" : "enable")
+    );
+    actions.appendChild(toggleBtn);
+
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "btn btn-ghost";
+    removeBtn.textContent = "Remove";
+    removeBtn.addEventListener("click", () => updateLearnedRule(rule, "delete"));
+    actions.appendChild(removeBtn);
+
+    row.appendChild(actions);
+    learnedRulesListEl.appendChild(row);
+  });
+}
+
+async function updateLearnedRule(rule, action) {
+  try {
+    const res = await fetch("/api/rules/learned", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        match_type: rule.match_type,
+        match_value: rule.match_value,
+        category: rule.category,
+        action,
+      }),
+    });
+    if (res.status === 401) {
+      showConnect();
+      return;
+    }
+    if (!res.ok) return;
+    const data = await res.json();
+    renderLearnedRules(data.rules || []);
+  } catch (err) {
+    // Ignore transient errors.
+  }
+}
+
+// --- Priority inbox ---
+
+async function loadPriority() {
+  try {
+    const res = await fetch("/api/priority");
+    if (!res.ok) return;
+    const data = await res.json();
+    renderPriority(data.items || []);
+  } catch (err) {
+    // Non-critical.
+  }
+}
+
+function renderPriority(items) {
+  if (!priorityListEl) return;
+  if (!items.length) {
+    priorityListEl.innerHTML = "";
+    if (priorityEmptyEl) priorityEmptyEl.classList.remove("hidden");
+    return;
+  }
+  if (priorityEmptyEl) priorityEmptyEl.classList.add("hidden");
+  priorityListEl.innerHTML = items
+    .map((it) => {
+      const subject = escapeHtml(it.subject || "(no subject)");
+      const sender = escapeHtml(it.sender || "");
+      const reason = escapeHtml(it.reason || "");
+      const category = escapeHtml(it.category || "");
+      const url = escapeHtml(it.gmail_url || "#");
+      const score = Math.max(0, Math.min(100, Number(it.score) || 0));
+      const senderAttr = escapeHtml(it.sender || "");
+      const options = currentCategories
+        .filter((c) => c)
+        .map((c) => {
+          const name = escapeHtml(c);
+          const selected = c === (it.category || "") ? " selected" : "";
+          return `<option value="${name}"${selected}>${name}</option>`;
+        })
+        .join("");
+      return `
+        <div class="priority-row" data-sender="${senderAttr}">
+          <span class="priority-score" title="Priority score">${score}</span>
+          <span class="priority-main">
+            <a class="priority-subject" href="${url}" target="_blank" rel="noopener">${subject}</a>
+            <span class="priority-sender">${sender}</span>
+            <span class="priority-reason">${category} &middot; ${reason}</span>
+          </span>
+          <select class="priority-relabel" title="Move this sender to a different category">
+            ${options}
+          </select>
+        </div>`;
+    })
+    .join("");
+}
+
+// Relabeling a priority row teaches the backend: the sender is forced into the
+// chosen category (POST /api/feedback), so future mail from them sorts that way.
+async function relabelPrioritySender(sender, category) {
+  if (!sender || !category) return;
+  try {
+    await fetch("/api/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sender, category }),
+    });
+    loadLearnedRules();
+  } catch (err) {
+    // Non-critical: the correction just won't be recorded this time.
+  }
+}
+
+if (priorityListEl) {
+  priorityListEl.addEventListener("change", (event) => {
+    const select = event.target;
+    if (!select.classList || !select.classList.contains("priority-relabel")) return;
+    const row = select.closest(".priority-row");
+    const sender = row ? row.getAttribute("data-sender") : "";
+    relabelPrioritySender(sender, select.value);
+  });
+}
+
+// --- Daily digest ---
+
+async function loadDigest() {
+  try {
+    const res = await fetch("/api/digest");
+    if (!res.ok) return;
+    const data = await res.json();
+    renderDigest(data);
+  } catch (err) {
+    // Non-critical.
+  }
+}
+
+function renderDigest(data) {
+  if (!digestBody) return;
+  const counts = data.counts || null;
+  let html = "";
+  if (counts) {
+    const entries = Object.entries(counts).filter(([k]) => k !== DRAFTED_KEY);
+    const total = entries.reduce((sum, [, n]) => sum + Number(n || 0), 0);
+    html += `<div class="digest-line"><strong>${total}</strong> emails sorted in your last run.</div>`;
+    if (entries.length) {
+      html +=
+        '<div class="digest-chips">' +
+        entries
+          .map(
+            ([k, n]) =>
+              `<span class="digest-chip">${escapeHtml(k)}: ${Number(n)}</span>`
+          )
+          .join("") +
+        "</div>";
+    }
+    const drafted = counts[DRAFTED_KEY];
+    if (drafted !== undefined && drafted !== null) {
+      html += `<div class="digest-line muted">${Number(drafted)} FAQ ${
+        Number(drafted) === 1 ? "reply" : "replies"
+      } drafted (check your Gmail Drafts).</div>`;
+    }
+  } else {
+    html +=
+      '<div class="digest-line muted">No run yet. Run Triage to see your digest.</div>';
+  }
+  html += `<div class="digest-line muted">${Number(
+    data.learned_active || 0
+  )} of ${Number(data.learned_total || 0)} learned rules are auto-sorting.</div>`;
+  digestBody.innerHTML = html;
+}
+
+// --- Undo last run ---
+
+async function loadUndoStatus() {
+  if (!undoRow) return;
+  try {
+    const res = await fetch("/api/undo");
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.run && data.run.action_count) {
+      undoRow.classList.remove("hidden");
+      undoStatusEl.textContent = `${data.run.action_count} emails can be reverted`;
+    } else {
+      undoRow.classList.add("hidden");
+      undoStatusEl.textContent = "";
+    }
+  } catch (err) {
+    // Non-critical.
+  }
+}
+
+async function undoLastRun() {
+  undoBtn.disabled = true;
+  undoStatusEl.textContent = "Reverting\u2026";
+  try {
+    const res = await fetch("/api/undo", { method: "POST" });
+    if (res.status === 401) {
+      showConnect();
+      return;
+    }
+    const data = await res.json();
+    if (data.status === "undone") {
+      undoStatusEl.textContent = `Reverted ${data.count} emails.`;
+      undoRow.classList.add("hidden");
+      loadPriority();
+      loadDigest();
+    } else {
+      undoStatusEl.textContent = "Nothing to undo.";
+      undoRow.classList.add("hidden");
+    }
+  } catch (err) {
+    undoStatusEl.textContent = "Could not undo. Try again.";
+  } finally {
+    undoBtn.disabled = false;
+  }
+}
+
+// --- Natural-language commands ---
+
+let lastCommandText = "";
+
+async function previewCommand() {
+  const text = commandInput.value.trim();
+  if (!text) {
+    commandStatusEl.textContent = "";
+    commandPreviewEl.classList.add("hidden");
+    commandActionsEl.classList.add("hidden");
+    return;
+  }
+  lastCommandText = text;
+  commandPreviewBtn.disabled = true;
+  commandStatusEl.textContent = "";
+  commandPreviewEl.classList.remove("hidden");
+  commandPreviewEl.innerHTML =
+    '<span class="muted">Reading your request\u2026</span>';
+  commandActionsEl.classList.add("hidden");
+  try {
+    const res = await fetch("/api/command/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (res.status === 401) {
+      showConnect();
+      return;
+    }
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      commandPreviewEl.innerHTML = `<span class="muted">${escapeHtml(
+        data.error || "Could not understand that."
+      )}</span>`;
+      return;
+    }
+    const samples = (data.samples || [])
+      .map(
+        (s) =>
+          `<div class="command-sample"><span class="command-sample-subject">${escapeHtml(
+            s.subject || "(no subject)"
+          )}</span> <span class="muted">${escapeHtml(s.sender || "")}</span></div>`
+      )
+      .join("");
+    commandPreviewEl.innerHTML =
+      `<div class="command-summary">${escapeHtml(data.summary || "")}</div>` +
+      `<div class="command-count"><strong>${Number(
+        data.count || 0
+      )}</strong> emails match.</div>` +
+      samples;
+    if (Number(data.count || 0) > 0) {
+      commandActionsEl.classList.remove("hidden");
+    } else {
+      commandActionsEl.classList.add("hidden");
+    }
+  } catch (err) {
+    commandPreviewEl.innerHTML =
+      '<span class="muted">Something went wrong. Try again.</span>';
+  } finally {
+    commandPreviewBtn.disabled = false;
+  }
+}
+
+async function executeCommand() {
+  if (!lastCommandText) return;
+  commandRunBtn.disabled = true;
+  commandStatusEl.textContent = "Working\u2026";
+  try {
+    const res = await fetch("/api/command/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    if (res.status === 401) {
+      showConnect();
+      return;
+    }
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      commandStatusEl.textContent = data.error || "Could not complete.";
+      return;
+    }
+    commandStatusEl.textContent = `Done. ${Number(
+      data.affected || 0
+    )} emails updated.`;
+    commandActionsEl.classList.add("hidden");
+    commandPreviewEl.classList.add("hidden");
+    commandInput.value = "";
+    lastCommandText = "";
+  } catch (err) {
+    commandStatusEl.textContent = "Something went wrong. Try again.";
+  } finally {
+    commandRunBtn.disabled = false;
+  }
+}
+
+function cancelCommand() {
+  commandPreviewEl.classList.add("hidden");
+  commandActionsEl.classList.add("hidden");
+  commandStatusEl.textContent = "";
+  lastCommandText = "";
 }
 
 function sleep(ms) {
@@ -435,6 +868,46 @@ async function refreshScheduleState() {
     }
   } catch (err) {
     // Ignore; leave current UI state as-is.
+  }
+}
+
+async function loadAutoTriage() {
+  try {
+    const res = await fetch("/api/triage/auto");
+    if (!res.ok) return;
+    const data = await res.json();
+    autoIntervalEl.value = data.interval_minutes ? String(data.interval_minutes) : "";
+    autoStatusEl.textContent = data.interval_minutes
+      ? `On, every ${data.interval_minutes} min`
+      : "";
+  } catch (err) {
+    // Ignore; the control just stays at its default.
+  }
+}
+
+async function saveAutoTriage() {
+  const value = autoIntervalEl.value;
+  autoStatusEl.textContent = "Saving…";
+  try {
+    const res = await fetch("/api/triage/auto", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ interval_minutes: value ? parseInt(value, 10) : null }),
+    });
+    if (res.status === 401) {
+      showConnect();
+      return;
+    }
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || `Server responded ${res.status}`);
+    }
+    const data = await res.json();
+    autoStatusEl.textContent = data.interval_minutes
+      ? `On, every ${data.interval_minutes} min`
+      : "Off";
+  } catch (err) {
+    autoStatusEl.textContent = `Could not save: ${err.message}`;
   }
 }
 
@@ -580,6 +1053,11 @@ function hideProgress() {
   triageProgress.classList.add("hidden");
 }
 
+function showCompletedBriefly() {
+  renderProgress({ percent: 100 });
+  window.setTimeout(hideProgress, 3000);
+}
+
 async function cancelTriage() {
   stopTriageBtn.disabled = true;
   statusEl.textContent = "Stopping…";
@@ -593,7 +1071,6 @@ async function cancelTriage() {
 async function runTriage(range, date) {
   setBusy(true);
   statusEl.textContent = "";
-  resultsCard.classList.add("hidden");
   showProgressStarting();
 
   try {
@@ -646,15 +1123,20 @@ async function pollUntilDone() {
     }
 
     if (progress.status === "done") {
-      renderProgress({ percent: 100 });
-      renderCounts(progress.counts || {});
+      showCompletedBriefly();
       statusEl.textContent = "Done.";
+      loadLearnedRules();
+      loadPriority();
+      loadDigest();
+      loadUndoStatus();
       return;
     }
     if (progress.status === "cancelled") {
-      renderProgress(progress);
-      renderCounts(progress.counts || {});
+      hideProgress();
       statusEl.textContent = "Triage stopped.";
+      loadDigest();
+      loadPriority();
+      loadUndoStatus();
       return;
     }
     if (progress.status === "error") {
@@ -673,6 +1155,7 @@ async function startWatchLoop() {
   // notices if the schedule got cleared (fired or cancelled elsewhere).
   if (pollActive) return;
   pollActive = true;
+  let lastStatus = null;
 
   while (pollActive) {
     await sleep(5000);
@@ -690,14 +1173,28 @@ async function startWatchLoop() {
           setSearchEnabled(true);
           unlockSearch();
         }
+        const initialStatus = lastStatus === null;
+        const changed = progress.status !== lastStatus;
         if (progress.status === "running") {
           renderProgress(progress);
-        } else if (progress.status === "done" && progress.counts) {
-          renderProgress({ percent: 100 });
-          renderCounts(progress.counts);
-        } else if (progress.status === "cancelled" && progress.counts) {
-          renderCounts(progress.counts);
+        } else if (
+          progress.status === "done" &&
+          progress.counts &&
+          changed &&
+          !initialStatus
+        ) {
+          // Only refresh the cards when a run just finished, not every tick.
+          showCompletedBriefly();
+          loadDigest();
+          loadPriority();
+          loadUndoStatus();
+        } else if (progress.status === "cancelled" && progress.counts && changed) {
+          hideProgress();
+          loadDigest();
+        } else if (initialStatus) {
+          hideProgress();
         }
+        lastStatus = progress.status;
       }
     } catch (err) {
       // Ignore transient errors and keep watching.
@@ -707,59 +1204,7 @@ async function startWatchLoop() {
   }
 }
 
-function renderCounts(counts) {
-  const drafted = counts[DRAFTED_KEY];
-  renderDraftedStat(drafted);
 
-  // The "FAQ (drafted)" value is shown as a separate highlighted stat, not as
-  // a category bar.
-  const entries = Object.entries(counts).filter(([key]) => key !== DRAFTED_KEY);
-
-  if (entries.length === 0) {
-    resultsEl.innerHTML = '<p class="muted">No emails were labeled.</p>';
-    resultsCard.classList.remove("hidden");
-    return;
-  }
-
-  // Order known categories first, then any extras alphabetically.
-  entries.sort((a, b) => {
-    const ia = CATEGORY_ORDER.indexOf(a[0]);
-    const ib = CATEGORY_ORDER.indexOf(b[0]);
-    const ra = ia === -1 ? CATEGORY_ORDER.length : ia;
-    const rb = ib === -1 ? CATEGORY_ORDER.length : ib;
-    return ra - rb || a[0].localeCompare(b[0]);
-  });
-
-  const max = Math.max(...entries.map(([, n]) => n));
-
-  resultsEl.innerHTML = entries
-    .map(([category, count]) => {
-      const pct = max > 0 ? (count / max) * 100 : 0;
-      return `
-        <div class="row">
-          <span class="label">${escapeHtml(category)}</span>
-          <span class="track"><span class="fill" style="width:${pct}%"></span></span>
-          <span class="count">${count}</span>
-        </div>`;
-    })
-    .join("");
-
-  resultsCard.classList.remove("hidden");
-}
-
-function renderDraftedStat(drafted) {
-  if (drafted === undefined || drafted === null) {
-    draftedStatEl.classList.add("hidden");
-    draftedStatEl.innerHTML = "";
-    return;
-  }
-
-  const noun = drafted === 1 ? "reply" : "replies";
-  draftedStatEl.innerHTML = `
-    <div class="stat-value">${drafted} FAQ ${noun} drafted</div>
-    <div class="stat-note">Review and send these from your Gmail Drafts.</div>`;
-  draftedStatEl.classList.remove("hidden");
-}
 
 function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, (c) => {
@@ -990,12 +1435,21 @@ function buildNeuralTree() {
 
 runBtn.addEventListener("click", onRunClick);
 scheduleBtn.addEventListener("click", onScheduleClick);
+autoIntervalEl.addEventListener("change", saveAutoTriage);
 signoutBtn.addEventListener("click", signOut);
 stopTriageBtn.addEventListener("click", cancelTriage);
 cancelScheduleLink.addEventListener("click", cancelSchedule);
 addCategoryBtn.addEventListener("click", addCategory);
 saveCategoriesBtn.addEventListener("click", saveCategories);
 searchBtn.addEventListener("click", runSearch);
+if (undoBtn) undoBtn.addEventListener("click", undoLastRun);
+if (commandPreviewBtn) commandPreviewBtn.addEventListener("click", previewCommand);
+if (commandRunBtn) commandRunBtn.addEventListener("click", executeCommand);
+if (commandCancelBtn) commandCancelBtn.addEventListener("click", cancelCommand);
+if (commandInput)
+  commandInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") previewCommand();
+  });
 searchInput.addEventListener("click", () => {
   if (!searchAvailable) showSearchLock();
 });

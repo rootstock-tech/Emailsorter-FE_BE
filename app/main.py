@@ -6,9 +6,21 @@ from collections import Counter
 
 from app.auto_reply import create_draft_reply
 from app.classifier import classify_emails
-from app.db import DEFAULT_CATEGORIES, DEFAULT_FAQ_CATEGORY, save_email_embedding
-from app.gmail_client import PROCESSED_LABEL, authenticate, fetch_unread_emails
+from app.db import (
+    DEFAULT_CATEGORIES,
+    DEFAULT_FAQ_CATEGORY,
+    get_active_rules,
+    is_known_contact,
+    record_triage_action,
+    remember_contact,
+    save_deadline,
+    save_email_embedding,
+    save_priority,
+)
+from app.deadlines import extract_deadline
+from app.gmail_client import PROCESSED_LABEL, authenticate, fetch_unread_emails, thread_has_user_reply
 from app.labeler import apply_label, get_or_create_label
+from app.priority import compute_priority
 from app.search import embed_text
 
 logging.basicConfig(
@@ -32,7 +44,33 @@ def _account_email(service):
 DRAFTED_KEY = "FAQ (drafted)"
 
 
-def triage(service, max_results=200, categories=None, faq_category=None, user_email=None, progress_cb=None, work_offset=0.0, should_cancel=None, sort_range=None, date=None):
+# Name fragments that mark a category as spam/newsletter (bulk mail). Used so an
+# active conversation is never left in one of these buckets.
+_SPAMMY_HINTS = ("spam", "newsletter", "promo", "junk")
+
+
+def _is_spammy(category):
+    """True if ``category`` looks like a spam/newsletter bucket."""
+    name = (category or "").lower()
+    return any(hint in name for hint in _SPAMMY_HINTS)
+
+
+def _conversation_target(categories):
+    """Pick the category an active conversation should move to (never spam).
+
+    Prefers "Needs Action" if the user has it (a live thread usually wants a
+    reply), else the first non-spammy category, else the last one.
+    """
+    for name in categories:
+        if name.lower() == "needs action":
+            return name
+    for name in categories:
+        if not _is_spammy(name):
+            return name
+    return categories[-1] if categories else "Needs Action"
+
+
+def triage(service, max_results=200, categories=None, faq_category=None, category_prompts=None, user_email=None, progress_cb=None, work_offset=0.0, should_cancel=None, sort_range=None, date=None, run_id=None):
     """Fetch unread emails, classify and label each, return counts.
 
     The caller supplies an authenticated Gmail ``service`` object, so the same
@@ -70,14 +108,50 @@ def triage(service, max_results=200, categories=None, faq_category=None, user_em
         if progress_cb is not None:
             progress_cb(work_offset + n_classified * 0.5)
 
+    # Load the user's learned rules once so senders/domains the LLM has already
+    # settled on are sorted deterministically (and cheaply) this run.
+    learned_rules = get_active_rules(user_email) if user_email else None
+
     classified = classify_emails(
         emails,
         categories=categories,
         faq_category=faq_category,
+        category_prompts=category_prompts,
+        user_email=user_email,
+        learned_rules=learned_rules,
         progress_cb=_on_classified,
         should_cancel=should_cancel,
     )
     logger.info("Classified %d email(s).", len(classified))
+
+    # Conversation-aware spam guard: if a mail was filed as spam/newsletter but
+    # the user has already replied in that thread, it is a live conversation, so
+    # move it out of spam. Only spam-classified mail triggers the (per-thread)
+    # Gmail lookup, keeping the extra API calls to a minimum.
+    conversation_target = _conversation_target(list(categories))
+    for i, (email, category) in enumerate(zip(emails, classified)):
+        if not _is_spammy(category):
+            continue
+        sender = email.get("sender")
+        # Remembered contact -> never spam, and no Gmail call needed.
+        if user_email and is_known_contact(user_email, sender):
+            classified[i] = conversation_target
+            logger.info("Known contact kept out of spam: %s", email.get("id", "<unknown>"))
+            continue
+        # Otherwise check the thread once; if the user replied, remember the
+        # sender so future runs skip this lookup entirely.
+        if thread_has_user_reply(service, email.get("thread_id")):
+            classified[i] = conversation_target
+            if user_email:
+                try:
+                    remember_contact(user_email, sender, reason="you replied in this thread")
+                except Exception:  # noqa: BLE001 - memory write is best-effort
+                    pass
+            logger.info(
+                "Kept conversation out of spam: %s -> %s",
+                email.get("id", "<unknown>"),
+                conversation_target,
+            )
 
     counts = Counter()
     faq_drafted = 0
@@ -125,6 +199,15 @@ def triage(service, max_results=200, categories=None, faq_category=None, user_em
                 category_label_ids[category] = label_id
             apply_label(service, message_id, label_id)
 
+            # Record the applied category label so this run can be undone later.
+            if run_id and user_email:
+                try:
+                    record_triage_action(
+                        run_id, user_email, message_id, label_id, category
+                    )
+                except Exception as exc:  # noqa: BLE001 - undo log is best-effort
+                    logger.warning("Could not record undo action for %s: %s", message_id, exc)
+
             # Mark as processed (with an internal, hidden label) so the *next*
             # fetch skips this email instead of re-processing it.
             if processed_label_id is not None:
@@ -151,6 +234,43 @@ def triage(service, max_results=200, categories=None, faq_category=None, user_em
         if faq_category is not None and category == faq_category:
             if create_draft_reply(service, email) is not None:
                 faq_drafted += 1
+
+        # Score this email's priority (deterministic, no LLM) so the dashboard
+        # can surface the most important mail first, with a short reason.
+        if user_email:
+            try:
+                score, reason = compute_priority(email, category, learned_rules)
+                save_priority(
+                    user_email,
+                    email.get("id", ""),
+                    email.get("thread_id", ""),
+                    email.get("sender", ""),
+                    email.get("subject", "") or "",
+                    category,
+                    score,
+                    reason,
+                    email.get("date", ""),
+                )
+            except Exception as exc:  # noqa: BLE001 - priority is best-effort
+                logger.warning("Failed to score priority for %s: %s", message_id, exc)
+
+        # Extract an explicit deadline (if any) so the user can be reminded
+        # before it. Best-effort and deterministic -- never blocks the batch.
+        if user_email:
+            try:
+                due_date, description = extract_deadline(email)
+                if due_date:
+                    save_deadline(
+                        user_email,
+                        email.get("id", ""),
+                        email.get("thread_id", ""),
+                        email.get("subject", "") or "",
+                        email.get("sender", ""),
+                        due_date,
+                        description,
+                    )
+            except Exception as exc:  # noqa: BLE001 - deadline capture is best-effort
+                logger.warning("Failed to extract deadline for %s: %s", message_id, exc)
 
         # Store a semantic embedding so this email is searchable later. This is
         # best-effort: any failure is logged and skipped so it never breaks
@@ -182,7 +302,7 @@ def triage(service, max_results=200, categories=None, faq_category=None, user_em
     return result
 
 
-def triage_until_empty(service, chunk_size=200, categories=None, faq_category=None, user_email=None, progress_cb=None, should_cancel=None, on_chunk_done=None, sort_range=None, date=None, max_total=None):
+def triage_until_empty(service, chunk_size=200, categories=None, faq_category=None, category_prompts=None, user_email=None, progress_cb=None, should_cancel=None, on_chunk_done=None, sort_range=None, date=None, max_total=None, run_id=None):
     """Run triage() in chunks until the inbox is caught up; return merged counts.
 
     Repeatedly processes up to ``chunk_size`` emails per iteration, merging the
@@ -219,12 +339,14 @@ def triage_until_empty(service, chunk_size=200, categories=None, faq_category=No
             max_results=this_chunk,
             categories=categories,
             faq_category=faq_category,
+            category_prompts=category_prompts,
             user_email=user_email,
             progress_cb=_report,
             work_offset=state["units"],
             should_cancel=should_cancel,
             sort_range=sort_range,
             date=date,
+            run_id=run_id,
         )
 
         # Real emails processed this iteration (the drafted sub-count is not a

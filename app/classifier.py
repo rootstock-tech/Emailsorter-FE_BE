@@ -14,6 +14,7 @@ from groq import Groq
 
 from app.config import GROQ_API_KEY
 from app.rules import classify_by_rules
+from app.db import match_learned_rule, record_llm_decision
 
 logger = logging.getLogger(__name__)
 
@@ -114,16 +115,24 @@ def category_definitions():
     return dict(_CATEGORY_HINTS)
 
 
-def _build_system_prompt(categories):
+def _build_system_prompt(categories, category_prompts=None):
     """Build the classifier system prompt from a user's category list.
 
-    Includes a short description of each recognized category so the model
-    classifies by real intent rather than guessing from the label name.
+    For each category the description is chosen in order: the user's own prompt
+    for that category (if given), then the built-in hint, then just the name.
+    User prompts let client/user-specific categories be classified accurately
+    instead of the model guessing from the label name alone.
     """
+    category_prompts = category_prompts or {}
     lines = []
     for category in categories:
-        hint = _CATEGORY_HINTS.get(category)
-        lines.append(f"- {category}: {hint}" if hint else f"- {category}")
+        user_prompt = category_prompts.get(category)
+        description = (
+            user_prompt.strip()
+            if isinstance(user_prompt, str) and user_prompt.strip()
+            else _CATEGORY_HINTS.get(category)
+        )
+        lines.append(f"- {category}: {description}" if description else f"- {category}")
     guidance = "\n".join(lines)
     example = list(categories)[:3] or list(categories)
 
@@ -223,7 +232,7 @@ def _classify_batch_with_groq(emails, system_prompt, valid_categories):
     return results
 
 
-def classify_emails(emails, categories=None, default_category=None, faq_category=None, progress_cb=None, should_cancel=None):
+def classify_emails(emails, categories=None, default_category=None, faq_category=None, category_prompts=None, user_email=None, learned_rules=None, progress_cb=None, should_cancel=None):
     """Classify a list of emails, returning a same-length list of categories.
 
     ``categories`` is the user's active category list (falls back to
@@ -247,13 +256,23 @@ def classify_emails(emails, categories=None, default_category=None, faq_category
         default_category = _pick_default_category(categories)
 
     valid_categories = set(categories)
-    system_prompt = _build_system_prompt(categories)
+    system_prompt = _build_system_prompt(categories, category_prompts)
 
     classified = [None] * len(emails)
     pending_indices = []
 
     for i, email in enumerate(emails):
         rule_category = classify_by_rules(email, categories)
+        # Then try a learned rule (a sender/domain the LLM has consistently sent
+        # to one category before), but only if that category is still in use.
+        if rule_category is None and learned_rules:
+            learned = match_learned_rule(learned_rules, email.get("sender"))
+            if (
+                learned is not None
+                and learned in valid_categories
+                and learned != default_category
+            ):
+                rule_category = learned
         if rule_category is not None:
             classified[i] = rule_category
         else:
@@ -300,6 +319,14 @@ def classify_emails(emails, categories=None, default_category=None, faq_category
 
         for idx, result in zip(chunk_indices, results):
             classified[idx] = result if result is not None else default_category
+            # Feed genuine LLM decisions back into the learned-rules store so a
+            # repeatedly-seen sender/domain becomes an automatic rule over time.
+            # The catch-all stays temporary so later mail can be reconsidered.
+            if result is not None and result != default_category and user_email:
+                try:
+                    record_llm_decision(user_email, emails[idx].get("sender"), result)
+                except Exception:  # noqa: BLE001 - learning must never break triage
+                    pass
 
         done_count += len(chunk_indices)
         if progress_cb is not None:

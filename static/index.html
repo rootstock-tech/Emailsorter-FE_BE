@@ -70,6 +70,11 @@
             <span id="triage-progress-label" class="triage-progress-label muted"></span>
           </div>
 
+          <div id="undo-row" class="undo-row hidden">
+            <button id="undo-btn" class="btn btn-ghost">Undo last sort</button>
+            <span id="undo-status" class="muted"></span>
+          </div>
+
           <div class="schedule-block">
             <h3 class="sub-heading">Schedule triage</h3>
             <p class="field-hint muted">Run automatically at a future date and time.</p>
@@ -87,6 +92,26 @@
               <button id="schedule-btn" class="btn btn-ghost">Schedule</button>
             </div>
           </div>
+
+          <div class="schedule-block">
+            <h3 class="sub-heading">Auto-sort</h3>
+            <p class="field-hint muted">
+              Keep sorting on its own. New mail is triaged automatically on this
+              interval, so mail that arrives after a run still gets sorted.
+            </p>
+            <div class="schedule-inputs">
+              <label for="auto-interval">Every</label>
+              <select id="auto-interval" aria-label="Auto-sort interval">
+                <option value="">Off</option>
+                <option value="5">5 minutes</option>
+                <option value="10">10 minutes</option>
+                <option value="15">15 minutes</option>
+                <option value="30">30 minutes</option>
+                <option value="60">60 minutes</option>
+              </select>
+              <span id="auto-status" class="muted"></span>
+            </div>
+          </div>
         </section>
 
         <!-- Authenticated: category settings -->
@@ -94,7 +119,9 @@
           <h2>Categories</h2>
           <p class="muted">
             Customize how your emails are sorted. Rename or remove categories,
-            or add your own.
+            or add your own. Add a short prompt to each category to describe what
+            belongs in it, so client- or user-specific categories are sorted
+            accurately.
           </p>
           <div id="category-list"></div>
           <button id="add-category-btn" class="btn btn-ghost">Add category</button>
@@ -110,14 +137,69 @@
             <span id="categories-status" class="muted"></span>
           </div>
         </section>
+
+        <!-- Authenticated: self-learning rules -->
+        <section id="learned-rules-card" class="card hidden">
+          <h2>Learned rules</h2>
+          <p class="muted">
+            As the AI sorts your mail, a sender it keeps filing the same way
+            becomes an automatic rule, so future mail from them is sorted
+            instantly without calling the AI. You stay in control: turn any rule
+            off or remove it.
+          </p>
+          <div id="learned-rules-list"></div>
+          <p id="learned-rules-empty" class="muted">
+            No learned rules yet. Run triage a few times and rules will appear
+            here as the AI notices repeat senders.
+          </p>
+        </section>
       </div>
 
       <div class="col">
-        <!-- Results -->
-        <section id="results-card" class="card hidden">
-          <h2>Results</h2>
-          <div id="drafted-stat" class="drafted-stat hidden"></div>
-          <div id="results"></div>
+        <!-- Daily digest -->
+        <section id="digest-card" class="card hidden">
+          <h2>Digest</h2>
+          <p class="muted">A quick snapshot of your latest sort.</p>
+          <div id="digest-body"></div>
+        </section>
+
+        <!-- Natural-language command bar -->
+        <section id="command-card" class="card hidden">
+          <h2>Ask in plain English</h2>
+          <p class="muted">
+            Tell the assistant what to do, like "archive all newsletters older
+            than 30 days" or "label all mail from stripe as Finance". You will
+            see a preview before anything happens.
+          </p>
+          <div class="actions">
+            <input
+              id="command-input"
+              type="text"
+              class="search-input"
+              placeholder="e.g. mark everything from linkedin as read"
+            />
+            <button id="command-preview-btn" class="btn">Preview</button>
+          </div>
+          <div id="command-preview" class="command-preview hidden"></div>
+          <div id="command-actions" class="actions hidden">
+            <button id="command-run-btn" class="btn">Confirm</button>
+            <button id="command-cancel-btn" class="btn btn-ghost">Cancel</button>
+            <span id="command-status" class="muted"></span>
+          </div>
+        </section>
+
+        <!-- Priority inbox -->
+        <section id="priority-card" class="card hidden">
+          <h2>Priority inbox</h2>
+          <p class="muted">
+            Your most important mail first, with a short reason why. Scored
+            automatically as mail is sorted.
+          </p>
+          <div id="priority-list"></div>
+          <p id="priority-empty" class="muted hidden">
+            No scored mail yet. Run Triage and the most important emails show up
+            here.
+          </p>
         </section>
 
         <!-- Semantic search -->

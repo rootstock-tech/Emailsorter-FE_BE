@@ -38,6 +38,8 @@ Security model:
   (categories, dates) are validated before use.
 """
 
+import base64
+import json
 import logging
 import secrets
 from contextlib import asynccontextmanager
@@ -51,19 +53,54 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from app.config import SESSION_HTTPS_ONLY, SESSION_SECRET
+from app.config import (
+    ADDON_SHARED_SECRET,
+    GMAIL_PUBSUB_TOPIC,
+    PUSH_AUTH_TOKEN,
+    SESSION_HTTPS_ONLY,
+    SESSION_SECRET,
+    validate_production_config,
+)
 from app.db import (
+    delete_learned_rule,
+    delete_priority,
+    clear_priority,
+    get_auto_triage,
+    get_run_actions,
     get_user_settings,
     get_user_token,
+    get_watch_state,
     has_embeddings,
     init_db,
+    last_undoable_run,
+    list_auto_triage,
+    list_known_contacts,
+    list_learned_rules,
+    list_user_emails,
+    mark_run_undone,
+    record_user_correction,
+    remember_contact,
+    save_priority,
+    save_user_token,
     save_user_settings,
+    save_watch_state,
+    set_auto_triage,
+    set_rule_active,
+    start_triage_run,
+    top_priority,
+    upcoming_deadlines,
 )
+from app.summarize import summarize_email
 from app.classifier import CLASSIFICATION_SUMMARY, category_definitions
+from app.commands import execute_command, parse_command, preview_command
+from app.labeler import get_or_create_label, remove_label
 from app.gmail_client import (
+    PROCESSED_LABEL,
     RANGE_DAYS,
     authenticate_from_token_json,
     count_unread_unprocessed,
+    start_watch,
+    unread_message_ids,
 )
 from app.main import triage_until_empty
 from app.search import search_emails
@@ -74,6 +111,7 @@ logger = logging.getLogger("email_triage.server")
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = BASE_DIR / "static"
 
+validate_production_config()
 init_db()
 
 # Background scheduler for optional periodic auto-processing. Started and
@@ -85,6 +123,18 @@ scheduler = BackgroundScheduler()
 async def lifespan(_app: FastAPI):
     scheduler.start()
     logger.info("Background scheduler started.")
+    # Gmail push watches expire (~7 days); renew everyone's daily when enabled.
+    if GMAIL_PUBSUB_TOPIC:
+        scheduler.add_job(
+            _renew_all_watches,
+            "interval",
+            hours=24,
+            id="gmail_watch_renewal",
+            replace_existing=True,
+        )
+    # Restore recurring auto-triage jobs saved by users across restarts.
+    for email, minutes in list_auto_triage():
+        _register_recurring(email, minutes)
     try:
         yield
     finally:
@@ -196,7 +246,10 @@ def _service_for_user(email):
     token_json = get_user_token(email)
     if token_json is None:
         return None
-    return authenticate_from_token_json(token_json)
+    return authenticate_from_token_json(
+        token_json,
+        on_refresh=lambda refreshed: save_user_token(email, refreshed),
+    )
 
 
 @app.get("/auth/login")
@@ -229,12 +282,10 @@ def auth_callback(request: Request):
     expected_state = request.session.pop("oauth_state", None)
     code_verifier = request.session.pop("oauth_code_verifier", None)
 
-    if not code or not code_verifier:
+    if not code or not code_verifier or not expected_state or not returned_state:
         return RedirectResponse("/?auth_error=1")
 
-    # A newer login attempt replaced this one's verifier -> the codes won't
-    # match. Ask the user to retry cleanly rather than failing cryptically.
-    if expected_state and returned_state and expected_state != returned_state:
+    if not secrets.compare_digest(expected_state, returned_state):
         return RedirectResponse("/?auth_error=1")
 
     try:
@@ -244,6 +295,8 @@ def auth_callback(request: Request):
         return RedirectResponse("/?auth_error=1")
 
     request.session["user_email"] = email
+    # Enable real-time push for this user (best-effort; no-op if push disabled).
+    _register_watch(email)
     return RedirectResponse("/")
 
 
@@ -265,6 +318,11 @@ async def api_triage(request: Request, background_tasks: BackgroundTasks):
         return _unauthenticated()
 
     sort_range, date = await _read_run_opts(request)
+    if date:
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            return JSONResponse({"error": "date must be YYYY-MM-DD"}, status_code=400)
 
     progress = _progress_by_user.setdefault(email, _default_progress())
     if progress["status"] == "running":
@@ -308,20 +366,51 @@ def _run_triage(email, service, sort_range="1d", date=None):
             # The first chunk's emails are now embedded -> search can be used.
             current["first_chunk_done"] = True
 
+    previous_priority = top_priority(email, 10000)
+
+    def restore_previous_priority():
+        try:
+            clear_priority(email)
+            for item in previous_priority:
+                save_priority(
+                    email,
+                    item.get("gmail_id"),
+                    item.get("thread_id"),
+                    item.get("sender"),
+                    item.get("subject"),
+                    item.get("category"),
+                    item.get("score"),
+                    item.get("reason"),
+                    item.get("date"),
+                )
+        except Exception:  # noqa: BLE001 - keep original triage outcome
+            logger.exception("Could not restore priority snapshot for %s.", email)
+
     try:
         settings = get_user_settings(email)
+        # Fresh run: start an undoable run record and clear the previous run's
+        # priority list so the dashboard reflects this run's mail.
+        run_id = secrets.token_hex(8)
+        try:
+            start_triage_run(run_id, email)
+            clear_priority(email)
+        except Exception:  # noqa: BLE001 - undo/priority are best-effort
+            run_id = None
         counts = triage_until_empty(
             service,
             categories=settings["categories"],
             faq_category=settings["faq_category"],
+            category_prompts=settings.get("category_prompts"),
             user_email=email,
             progress_cb=report,
             should_cancel=should_cancel,
             on_chunk_done=on_chunk_done,
             sort_range=sort_range,
             date=date,
+            run_id=run_id,
         )
         if _cancel_by_user.get(email, False):
+            restore_previous_priority()
             progress.update(status="cancelled", counts=counts, error=None)
         else:
             progress.update(
@@ -333,6 +422,7 @@ def _run_triage(email, service, sort_range="1d", date=None):
             )
     except Exception:  # noqa: BLE001 - surface failure via status endpoint
         logger.exception("Background triage run failed for %s.", email)
+        restore_previous_priority()
         progress.update(
             status="error",
             counts=None,
@@ -378,6 +468,42 @@ def _cancel_scheduled_run(email):
     except JobLookupError:
         pass
     return True
+
+
+# Recurring auto-triage: intervals (minutes) users may pick.
+_AUTO_INTERVALS = {5, 10, 15, 30, 60}
+
+
+def _run_recurring_triage(email):
+    """APScheduler entry point for recurring auto-triage (fires every N min)."""
+    progress = _progress_by_user.setdefault(email, _default_progress())
+    if progress["status"] == "running":
+        return  # a manual/scheduled run is active; skip this tick
+    service = _service_for_user(email)
+    if service is None:
+        logger.warning("Recurring run for %s skipped: no valid stored token.", email)
+        return
+    _run_triage(email, service, "1d")
+
+
+def _register_recurring(email, minutes):
+    """(Re)register a user's recurring auto-triage interval job."""
+    scheduler.add_job(
+        _run_recurring_triage,
+        trigger="interval",
+        minutes=int(minutes),
+        args=[email],
+        id=f"triage-recurring-{email}",
+        replace_existing=True,
+    )
+
+
+def _unregister_recurring(email):
+    """Remove a user's recurring auto-triage job, if any."""
+    try:
+        scheduler.remove_job(f"triage-recurring-{email}")
+    except JobLookupError:
+        pass
 
 
 @app.get("/api/triage/status")
@@ -451,10 +577,12 @@ def api_labels_guide(request: Request):
         return _unauthenticated()
     settings = get_user_settings(email)
     definitions = category_definitions()
+    prompts = settings.get("category_prompts") or {}
     labels = [
         {
             "name": category,
-            "description": definitions.get(category)
+            "description": (prompts.get(category) or "").strip()
+            or definitions.get(category)
             or "This is your own category, so mail is sorted into it based on its name.",
         }
         for category in settings["categories"]
@@ -537,6 +665,221 @@ def api_triage_schedule_cancel(request: Request):
     return JSONResponse({"status": "cancelled" if cancelled else "none"})
 
 
+@app.get("/api/triage/auto")
+def api_get_auto_triage(request: Request):
+    """Return the user's recurring auto-triage interval in minutes, or null."""
+    email = current_user_email(request)
+    if not email:
+        return _unauthenticated()
+    return JSONResponse({"interval_minutes": get_auto_triage(email)})
+
+
+@app.post("/api/triage/auto")
+async def api_set_auto_triage(request: Request):
+    """Turn recurring auto-triage on/off for the current user.
+
+    Body: {"interval_minutes": int|null}. A positive allowed value enables it and
+    the server re-triages the inbox on that interval; null or 0 disables it.
+    """
+    email = current_user_email(request)
+    if not email:
+        return _unauthenticated()
+    if get_user_token(email) is None:
+        return _unauthenticated()
+
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - handled as validation below
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    minutes = body.get("interval_minutes")
+    if minutes in (None, 0, "0", ""):
+        set_auto_triage(email, None)
+        _unregister_recurring(email)
+        return JSONResponse({"interval_minutes": None})
+
+    try:
+        minutes = int(minutes)
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "interval_minutes must be an integer."}, status_code=400)
+    if minutes not in _AUTO_INTERVALS:
+        return JSONResponse(
+            {"error": f"interval_minutes must be one of {sorted(_AUTO_INTERVALS)}."},
+            status_code=400,
+        )
+
+    set_auto_triage(email, minutes)
+    _register_recurring(email, minutes)
+    return JSONResponse({"interval_minutes": minutes})
+
+
+# --- Gmail Add-on (Apps Script) endpoints ---------------------------------
+#
+# The add-on runs on Google's servers and calls these with a shared secret in
+# the X-Addon-Secret header. Each call names the user by email; that user must
+# have connected once via the web OAuth login (so a token is stored).
+
+
+def _addon_authorized(request):
+    """True only if the request carries the configured add-on shared secret."""
+    secret = request.headers.get("x-addon-secret") or ""
+    return bool(ADDON_SHARED_SECRET) and secret == ADDON_SHARED_SECRET
+
+
+@app.post("/api/addon/triage")
+async def api_addon_triage(request: Request, background_tasks: BackgroundTasks):
+    """Start a triage run for a user, called by the Gmail Add-on."""
+    if not _addon_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    email = (body or {}).get("email")
+    if not email or get_user_token(email) is None:
+        return JSONResponse({"error": "user not connected"}, status_code=404)
+
+    progress = _progress_by_user.setdefault(email, _default_progress())
+    if progress["status"] == "running":
+        return JSONResponse({"status": "running"})
+    service = _service_for_user(email)
+    if service is None:
+        return JSONResponse({"error": "user not connected"}, status_code=404)
+    sort_range = (body or {}).get("range")
+    if sort_range not in RANGE_DAYS:
+        sort_range = "1d"
+    progress.update(status="running", counts=None, error=None, percent=0, first_chunk_done=False)
+    background_tasks.add_task(_run_triage, email, service, sort_range, None)
+    return JSONResponse({"status": "started"})
+
+
+@app.get("/api/addon/status")
+def api_addon_status(request: Request):
+    """Return triage status + auto-sort interval for a user (add-on)."""
+    if not _addon_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    email = request.query_params.get("email")
+    if not email:
+        return JSONResponse({"error": "email required"}, status_code=400)
+    progress = _progress_by_user.get(email) or _default_progress()
+    return JSONResponse(
+        {
+            "connected": get_user_token(email) is not None,
+            "status": progress.get("status"),
+            "percent": progress.get("percent"),
+            "counts": progress.get("counts"),
+            "interval_minutes": get_auto_triage(email),
+        }
+    )
+
+
+@app.post("/api/addon/auto")
+async def api_addon_auto(request: Request):
+    """Set recurring auto-triage interval for a user (add-on)."""
+    if not _addon_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    email = (body or {}).get("email")
+    if not email or get_user_token(email) is None:
+        return JSONResponse({"error": "user not connected"}, status_code=404)
+    minutes = (body or {}).get("interval_minutes")
+    if minutes in (None, 0, "0", ""):
+        set_auto_triage(email, None)
+        _unregister_recurring(email)
+        return JSONResponse({"interval_minutes": None})
+    try:
+        minutes = int(minutes)
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "interval_minutes must be an integer."}, status_code=400)
+    if minutes not in _AUTO_INTERVALS:
+        return JSONResponse({"error": "invalid interval."}, status_code=400)
+    set_auto_triage(email, minutes)
+    _register_recurring(email, minutes)
+    return JSONResponse({"interval_minutes": minutes})
+
+
+@app.get("/api/addon/digest")
+def api_addon_digest(request: Request):
+    """Return a compact summary + top priority mail for a user (add-on)."""
+    if not _addon_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    email = request.query_params.get("email")
+    if not email or get_user_token(email) is None:
+        return JSONResponse({"error": "user not connected"}, status_code=404)
+    progress = _progress_by_user.get(email)
+    counts = progress["counts"] if progress else None
+    rules = list_learned_rules(email)
+    active_rules = sum(1 for r in rules if r.get("active"))
+    top = _with_gmail_url(top_priority(email, 3), email)
+    # Alerts: pressing mail (red-flag / needs-action) the user hasn't opened yet.
+    alert_cats = {"red flag", "needs action"}
+    candidates = [
+        p for p in top_priority(email, 15)
+        if (p.get("category") or "").lower() in alert_cats
+    ]
+    service = _service_for_user(email)
+    if service is not None and candidates:
+        unread = unread_message_ids(service, [c.get("gmail_id") for c in candidates])
+        candidates = [c for c in candidates if c.get("gmail_id") in unread]
+    alerts = _with_gmail_url(candidates[:3], email)
+    deadlines = _with_gmail_url(upcoming_deadlines(email, limit=3), email)
+    run = last_undoable_run(email)
+    return JSONResponse(
+        {
+            "counts": counts,
+            "top": top,
+            "alerts": alerts,
+            "deadlines": deadlines,
+            "learned_active": active_rules,
+            "learned_total": len(rules),
+            "undo_count": run["action_count"] if run else 0,
+        }
+    )
+
+
+@app.post("/api/addon/summarize")
+async def api_addon_summarize(request: Request):
+    """Summarise one mail into a few bullets for the Gmail Add-on."""
+    if not _addon_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    subject = (body or {}).get("subject") or ""
+    mail_body = (body or {}).get("body") or ""
+    sender = (body or {}).get("sender") or ""
+    if not subject and not mail_body:
+        return JSONResponse({"error": "nothing to summarize"}, status_code=400)
+    summary = summarize_email(subject, mail_body, sender)
+    if summary is None:
+        return JSONResponse({"error": "summarize unavailable"}, status_code=503)
+    return JSONResponse({"summary": summary})
+
+
+@app.post("/api/addon/undo")
+async def api_addon_undo(request: Request):
+    """Undo the most recent triage run for a user (add-on)."""
+    if not _addon_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    email = (body or {}).get("email")
+    if not email or get_user_token(email) is None:
+        return JSONResponse({"error": "user not connected"}, status_code=404)
+    service = _service_for_user(email)
+    if service is None:
+        return JSONResponse({"error": "user not connected"}, status_code=404)
+    return JSONResponse(_perform_undo(email, service))
+
+
 @app.get("/api/settings/categories")
 def api_get_categories(request: Request):
     """Return the current user's category settings (or defaults)."""
@@ -591,8 +934,424 @@ async def api_save_categories(request: Request):
             )
         faq_category = faq_category.strip()
 
-    save_user_settings(email, cleaned, faq_category)
-    return JSONResponse({"categories": cleaned, "faq_category": faq_category})
+    # Optional per-category prompts: {name: description}. Keep only non-empty
+    # descriptions for categories that were actually saved.
+    raw_prompts = body.get("category_prompts")
+    category_prompts = {}
+    if raw_prompts is not None:
+        if not isinstance(raw_prompts, dict):
+            return JSONResponse(
+                {"error": "category_prompts must be an object."}, status_code=400
+            )
+        for name, prompt in raw_prompts.items():
+            if not isinstance(prompt, str):
+                return JSONResponse(
+                    {"error": "each category prompt must be a string."},
+                    status_code=400,
+                )
+            name = name.strip()
+            prompt = prompt.strip()
+            if name in cleaned and prompt:
+                category_prompts[name] = prompt
+
+    save_user_settings(email, cleaned, faq_category, category_prompts)
+    return JSONResponse(
+        {
+            "categories": cleaned,
+            "faq_category": faq_category,
+            "category_prompts": category_prompts,
+        }
+    )
+
+
+@app.get("/api/rules/learned")
+def api_get_learned_rules(request: Request):
+    """Return the user's learned rules (sender/domain -> category mappings)."""
+    email = current_user_email(request)
+    if not email:
+        return _unauthenticated()
+    return JSONResponse({"rules": list_learned_rules(email)})
+
+@app.post("/api/rules/learned")
+async def api_update_learned_rule(request: Request):
+    """Enable, disable, or delete a single learned rule.
+
+    Body: {match_type, match_value, category, action: "enable"|"disable"|"delete"}.
+    """
+    email = current_user_email(request)
+    if not email:
+        return _unauthenticated()
+    if get_user_token(email) is None:
+        return _unauthenticated()
+
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - handled as validation below
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    match_type = body.get("match_type")
+    match_value = body.get("match_value")
+    category = body.get("category")
+    action = body.get("action")
+    if match_type not in ("sender", "domain") or not isinstance(match_value, str) or not isinstance(category, str):
+        return JSONResponse({"error": "invalid rule identifier."}, status_code=400)
+    if action not in ("enable", "disable", "delete"):
+        return JSONResponse({"error": "action must be enable, disable, or delete."}, status_code=400)
+
+    if action == "delete":
+        delete_learned_rule(email, match_type, match_value, category)
+    else:
+        set_rule_active(email, match_type, match_value, category, action == "enable")
+    return JSONResponse({"rules": list_learned_rules(email)})
+
+
+@app.post("/api/feedback")
+async def api_feedback(request: Request):
+    """Learn from a manual relabel: force the sender into the chosen category.
+
+    Body: {sender, category}. The correction becomes an active learned rule at
+    once, so the next mail from that sender is sorted the user's way.
+    """
+    email = current_user_email(request)
+    if not email:
+        return _unauthenticated()
+    if get_user_token(email) is None:
+        return _unauthenticated()
+
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - handled as validation below
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    sender = body.get("sender")
+    category = body.get("category")
+    if not isinstance(sender, str) or not sender.strip():
+        return JSONResponse({"error": "sender is required."}, status_code=400)
+    if not isinstance(category, str) or not category.strip():
+        return JSONResponse({"error": "category is required."}, status_code=400)
+
+    record_user_correction(email, sender, category.strip())
+    # A correction out of spam also means this is someone the user deals with,
+    # so remember them as a contact (never spam going forward).
+    if "spam" not in category.lower() and "newsletter" not in category.lower():
+        remember_contact(email, sender, reason="you moved their mail out of spam")
+    return JSONResponse({"rules": list_learned_rules(email)})
+
+
+# --- Priority inbox --------------------------------------------------------
+
+
+def _with_gmail_url(items, email):
+    """Attach a deep-link to each item's Gmail thread for the connected account."""
+    for item in items:
+        thread_id = item.get("thread_id") or ""
+        item["gmail_url"] = (
+            f"https://mail.google.com/mail/?authuser={email}#all/{thread_id}"
+        )
+    return items
+
+
+@app.get("/api/priority")
+def api_priority(request: Request, limit: int = 15):
+    """Return the current user's highest-priority emails (most important first)."""
+    email = current_user_email(request)
+    if not email:
+        return _unauthenticated()
+    items = _with_gmail_url(top_priority(email, limit), email)
+    return JSONResponse({"items": items})
+
+
+# --- Undo last run ---------------------------------------------------------
+
+
+@app.get("/api/undo")
+def api_undo_status(request: Request):
+    """Report whether the current user has a triage run that can be undone."""
+    email = current_user_email(request)
+    if not email:
+        return _unauthenticated()
+    return JSONResponse({"run": last_undoable_run(email)})
+
+
+@app.post("/api/undo")
+def api_undo(request: Request):
+    """Undo the most recent triage run: remove the labels it applied.
+
+    Also removes the internal AI-Processed marker on affected mail so it can be
+    sorted again, and clears those emails from the priority list.
+    """
+    email = current_user_email(request)
+    if not email:
+        return _unauthenticated()
+    service = _service_for_user(email)
+    if service is None:
+        return _unauthenticated()
+    return JSONResponse(_perform_undo(email, service))
+
+
+def _perform_undo(email, service):
+    """Core undo: revert the last run's labels for a user. Returns a result dict."""
+    run = last_undoable_run(email)
+    if not run:
+        return {"status": "none"}
+
+    actions = get_run_actions(run["run_id"])
+    processed_label_id = None
+    try:
+        processed_label_id = get_or_create_label(
+            service, PROCESSED_LABEL, hidden=True, account_key=email
+        )
+    except Exception:  # noqa: BLE001 - keep undoing category labels regardless
+        processed_label_id = None
+
+    affected = set()
+    failures = []
+    for action in actions:
+        gid = action.get("gmail_id")
+        label_id = action.get("label_id")
+        if not gid or not label_id:
+            failures.append(gid or "unknown")
+            continue
+        try:
+            remove_label(service, gid, label_id)
+            affected.add(gid)
+        except Exception:  # noqa: BLE001 - one failure must not stop the rest
+            logger.warning("Undo: could not remove label from %s", gid)
+            failures.append(gid)
+
+    # Remove the hidden processed marker so undone mail can be re-sorted.
+    if processed_label_id is None and affected:
+        failures.extend(affected)
+    elif processed_label_id is not None:
+        for gid in affected:
+            try:
+                remove_label(service, gid, processed_label_id)
+            except Exception:  # noqa: BLE001 - best-effort
+                failures.append(gid)
+
+    delete_priority(email, list(affected))
+    if failures:
+        return {
+            "status": "partial",
+            "count": len(affected),
+            "failed": len(set(failures)),
+            "error": "Some labels could not be reverted. Retry undo.",
+        }
+    mark_run_undone(run["run_id"])
+    return {"status": "undone", "count": len(affected)}
+
+
+# --- Natural-language commands ---------------------------------------------
+
+
+@app.post("/api/command/preview")
+async def api_command_preview(request: Request):
+    """Parse a plain-English instruction and preview what it would affect."""
+    email = current_user_email(request)
+    if not email:
+        return _unauthenticated()
+    service = _service_for_user(email)
+    if service is None:
+        return _unauthenticated()
+
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    text = (body or {}).get("text") if isinstance(body, dict) else None
+
+    parsed = parse_command(text)
+    if parsed.get("error"):
+        return JSONResponse({"error": parsed["error"]}, status_code=400)
+
+    try:
+        preview = preview_command(service, parsed)
+    except Exception:  # noqa: BLE001 - surface a friendly error
+        logger.exception("Command preview failed for %s.", email)
+        return JSONResponse({"error": "Could not search your mail. Try again."}, status_code=500)
+
+    request.session["command_preview"] = {
+        "parsed": parsed,
+        "ids": preview["ids"],
+        "created_at": datetime.now().timestamp(),
+    }
+    return JSONResponse(
+        {
+            "action": parsed["action"],
+            "label": parsed.get("label"),
+            "summary": parsed.get("summary"),
+            "count": preview["count"],
+            "samples": preview["samples"],
+        }
+    )
+
+
+@app.post("/api/command/execute")
+async def api_command_execute(request: Request):
+    """Execute a previously previewed plain-English instruction."""
+    email = current_user_email(request)
+    if not email:
+        return _unauthenticated()
+    service = _service_for_user(email)
+    if service is None:
+        return _unauthenticated()
+
+    plan = request.session.pop("command_preview", None)
+    if not isinstance(plan, dict):
+        return JSONResponse({"error": "Preview this command again before running it."}, status_code=409)
+    parsed = plan.get("parsed")
+    ids = plan.get("ids")
+    created_at = plan.get("created_at")
+    if (
+        not isinstance(parsed, dict)
+        or parsed.get("action") not in {"label", "archive", "mark_read"}
+        or not isinstance(ids, list)
+        or not isinstance(created_at, (int, float))
+        or datetime.now().timestamp() - created_at > 600
+    ):
+        return JSONResponse({"error": "That preview expired. Preview the command again."}, status_code=409)
+
+    try:
+        affected = execute_command(service, parsed, ids, account_key=email)
+    except Exception:  # noqa: BLE001
+        logger.exception("Command execute failed for %s.", email)
+        return JSONResponse({"error": "Could not complete that action. Try again."}, status_code=500)
+
+    return JSONResponse({"status": "done", "affected": affected, "summary": parsed.get("summary")})
+
+
+# --- Daily digest ----------------------------------------------------------
+
+
+@app.get("/api/digest")
+def api_digest(request: Request):
+    """Return a compact summary: last-run counts + top priority + rule activity."""
+    email = current_user_email(request)
+    if not email:
+        return _unauthenticated()
+    progress = _progress_by_user.get(email)
+    counts = progress["counts"] if progress else None
+    rules = list_learned_rules(email)
+    active_rules = sum(1 for r in rules if r.get("active"))
+    top = _with_gmail_url(top_priority(email, 5), email)
+    deadlines = _with_gmail_url(upcoming_deadlines(email, limit=5), email)
+    return JSONResponse(
+        {
+            "counts": counts,
+            "top": top,
+            "deadlines": deadlines,
+            "learned_active": active_rules,
+            "learned_total": len(rules),
+        }
+    )
+
+
+@app.get("/api/deadlines")
+def api_deadlines(request: Request, limit: int = 20):
+    """Return the user's upcoming deadlines (soonest first) with Gmail links."""
+    email = current_user_email(request)
+    if not email:
+        return _unauthenticated()
+    items = _with_gmail_url(upcoming_deadlines(email, limit=limit), email)
+    return JSONResponse({"deadlines": items})
+
+
+@app.get("/api/memory")
+def api_memory(request: Request):
+    """Everything the assistant remembers: learned rules + known contacts."""
+    email = current_user_email(request)
+    if not email:
+        return _unauthenticated()
+    rules = list_learned_rules(email)
+    return JSONResponse(
+        {
+            "learned_rules": rules,
+            "learned_active": sum(1 for r in rules if r.get("active")),
+            "contacts": list_known_contacts(email),
+        }
+    )
+
+
+# --- Real-time Gmail push (Pub/Sub) ---------------------------------------
+
+
+def _register_watch(email, service=None):
+    """Register/refresh a Gmail push watch for one user (best-effort)."""
+    if not GMAIL_PUBSUB_TOPIC:
+        return
+    try:
+        service = service or _service_for_user(email)
+        if service is None:
+            return
+        result = start_watch(service, GMAIL_PUBSUB_TOPIC)
+        save_watch_state(email, result.get("historyId"), result.get("expiration"))
+        logger.info("Gmail watch registered for %s (expires %s).", email, result.get("expiration"))
+    except Exception:  # noqa: BLE001 - push is optional; never break the app
+        logger.exception("Failed to register Gmail watch for %s.", email)
+
+
+def _renew_all_watches():
+    """Re-register watches for every connected user (scheduled daily)."""
+    for email in list_user_emails():
+        _register_watch(email)
+
+
+@app.post("/api/gmail/push")
+async def api_gmail_push(request: Request, background_tasks: BackgroundTasks):
+    """Receive a Gmail push notification (Pub/Sub) and triage the user's new mail.
+
+    Pub/Sub delivers {"message": {"data": base64(JSON {emailAddress, historyId})}}.
+    We acknowledge quickly with 200 and run triage in the background. Already
+    handled mail carries the AI-Processed label, so a push never re-sorts old
+    mail. Every path returns 200 so Pub/Sub does not retry-storm on bad input.
+    """
+    if not GMAIL_PUBSUB_TOPIC or not PUSH_AUTH_TOKEN:
+        return JSONResponse({"error": "push disabled"}, status_code=404)
+    supplied_token = request.query_params.get("token") or ""
+    if not secrets.compare_digest(supplied_token, PUSH_AUTH_TOKEN):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    try:
+        envelope = await request.json()
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"ok": True})
+    message = (envelope or {}).get("message") or {}
+    data = message.get("data")
+    if not data:
+        return JSONResponse({"ok": True})
+    try:
+        payload = json.loads(base64.b64decode(data).decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"ok": True})
+
+    email = payload.get("emailAddress")
+    if not email or get_user_token(email) is None:
+        return JSONResponse({"ok": True})
+
+    # Record the latest historyId as an ack marker (keep any known expiration).
+    if payload.get("historyId") is not None:
+        try:
+            state = get_watch_state(email) or {}
+            save_watch_state(email, payload.get("historyId"), state.get("expiration"))
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Do not start a second run if one is already active for this user.
+    progress = _progress_by_user.setdefault(email, _default_progress())
+    if progress["status"] == "running":
+        return JSONResponse({"ok": True})
+
+    service = _service_for_user(email)
+    if service is None:
+        return JSONResponse({"ok": True})
+
+    progress.update(status="running", counts=None, error=None, percent=0, first_chunk_done=False)
+    background_tasks.add_task(_run_triage, email, service, "1d", None)
+    return JSONResponse({"ok": True})
 
 
 @app.get("/api/search")
