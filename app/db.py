@@ -1171,6 +1171,19 @@ def save_deadline(user_email, gmail_id, thread_id, subject, sender, due_date, de
         conn.close()
 
 
+def delete_deadline(user_email, gmail_id):
+    """Remove a deadline that is no longer appropriate for a message."""
+    conn = _connect()
+    try:
+        conn.execute(
+            "DELETE FROM deadlines WHERE user_email = ? AND gmail_id = ?",
+            (user_email, gmail_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def upcoming_deadlines(user_email, on_or_before=None, limit=20):
     """Return the user's deadlines due today or later, soonest first.
 
@@ -1183,18 +1196,30 @@ def upcoming_deadlines(user_email, on_or_before=None, limit=20):
         if on_or_before:
             rows = conn.execute(
                 """
-                SELECT gmail_id, thread_id, subject, sender, due_date, description
-                FROM deadlines WHERE user_email = ? AND due_date >= ? AND due_date <= ?
-                ORDER BY due_date ASC LIMIT ?
+                                SELECT d.gmail_id, d.thread_id, d.subject, d.sender, d.due_date, d.description
+                                FROM deadlines d
+                                LEFT JOIN email_priority p
+                                    ON p.user_email = d.user_email AND p.gmail_id = d.gmail_id
+                                WHERE d.user_email = ? AND d.due_date >= ? AND d.due_date <= ?
+                                    AND lower(COALESCE(p.category, '')) NOT LIKE '%spam%'
+                                    AND lower(COALESCE(p.category, '')) NOT LIKE '%newsletter%'
+                                    AND lower(COALESCE(p.category, '')) NOT LIKE '%promo%'
+                                ORDER BY d.due_date ASC LIMIT ?
                 """,
                 (user_email, today, on_or_before, limit),
             ).fetchall()
         else:
             rows = conn.execute(
                 """
-                SELECT gmail_id, thread_id, subject, sender, due_date, description
-                FROM deadlines WHERE user_email = ? AND due_date >= ?
-                ORDER BY due_date ASC LIMIT ?
+                                SELECT d.gmail_id, d.thread_id, d.subject, d.sender, d.due_date, d.description
+                                FROM deadlines d
+                                LEFT JOIN email_priority p
+                                    ON p.user_email = d.user_email AND p.gmail_id = d.gmail_id
+                                WHERE d.user_email = ? AND d.due_date >= ?
+                                    AND lower(COALESCE(p.category, '')) NOT LIKE '%spam%'
+                                    AND lower(COALESCE(p.category, '')) NOT LIKE '%newsletter%'
+                                    AND lower(COALESCE(p.category, '')) NOT LIKE '%promo%'
+                                ORDER BY d.due_date ASC LIMIT ?
                 """,
                 (user_email, today, limit),
             ).fetchall()

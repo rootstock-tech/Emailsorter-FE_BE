@@ -9,6 +9,7 @@ from app.classifier import classify_emails
 from app.db import (
     DEFAULT_CATEGORIES,
     DEFAULT_FAQ_CATEGORY,
+    delete_deadline,
     get_active_rules,
     get_conversation,
     is_known_contact,
@@ -311,7 +312,12 @@ def triage(service, max_results=200, categories=None, faq_category=None, categor
 
         # Extract an explicit deadline (if any) so the user can be reminded
         # before it. Best-effort and deterministic -- never blocks the batch.
-        if user_email:
+        if user_email and _is_spammy(category):
+            try:
+                delete_deadline(user_email, email.get("id", ""))
+            except Exception as exc:  # noqa: BLE001 - cleanup is best-effort
+                logger.warning("Failed to clear spam deadline for %s: %s", message_id, exc)
+        elif user_email:
             try:
                 due_date, description = extract_deadline(email)
                 if due_date is None:

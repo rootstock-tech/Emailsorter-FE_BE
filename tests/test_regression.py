@@ -160,6 +160,23 @@ class DatabaseRegressionTests(unittest.TestCase):
         self.assertEqual([item["gmail_id"] for item in items], ["m1", "m2"])
         self.assertEqual(items[0]["due_date"], "2099-08-09")
 
+    def test_spam_deadline_is_hidden_and_can_be_deleted(self):
+        user = "user@example.com"
+        db.save_deadline(user, "spam-1", "t1", "Sale expires today", "seller@example.com", "2099-08-10", "Sale")
+        db.save_priority(user, "spam-1", "t1", "seller@example.com", "Sale expires today", "Spam/Newsletter", 5, "promo", "2099-08-01")
+
+        self.assertEqual(db.upcoming_deadlines(user), [])
+        db.delete_deadline(user, "spam-1")
+        conn = db._connect()
+        try:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM deadlines WHERE user_email = ? AND gmail_id = ?",
+                (user, "spam-1"),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(count, 0)
+
     def test_reminder_state_enforces_gap_and_max_count(self):
         user = "user@example.com"
         now = datetime(2026, 8, 8, 12, tzinfo=timezone.utc)
