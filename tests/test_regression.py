@@ -552,6 +552,7 @@ class AddonContractTests(unittest.TestCase):
             "openAttentionMails",
             "openUpcomingDeadlines",
             "authorizeExternalRequest",
+            "resetAuthorization",
             "runTriage",
             "setAuto",
             "undoRun",

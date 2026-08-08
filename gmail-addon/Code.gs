@@ -104,6 +104,9 @@ function apiPost_(path, payload) {
 }
 
 function authorizeExternalRequest() {
+  ScriptApp.requireScopes(ScriptApp.AuthMode.FULL, [
+    'https://www.googleapis.com/auth/script.external_request',
+  ]);
   var cfg = getConfig_();
   if (!cfg.backendUrl) {
     throw new Error('BACKEND_URL is not configured.');
@@ -113,6 +116,10 @@ function authorizeExternalRequest() {
     muteHttpExceptions: true,
     headers: apiHeaders_(),
   });
+}
+
+function resetAuthorization() {
+  ScriptApp.invalidateAuth();
 }
 
 function onHomepage(e) {
