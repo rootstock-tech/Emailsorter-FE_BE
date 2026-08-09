@@ -52,9 +52,9 @@ without giving an AI the ability to send mail on their behalf.
 - **Semantic search.** Every processed email is embedded locally with a small
   `fastembed` model and stored in SQLite. Search ranks results by cosine
   similarity to your query's embedding — no external vector database needed.
-- **Gmail add-on.** An Apps Script card provides triage controls, priority mail,
-  unread alerts, deadlines, undo, scheduling, and contextual summarization in
-  Gmail web/mobile.
+- **Gmail add-on.** An Apps Script card provides date/range triage controls,
+  unread alerts, deadlines, auto-sort, undo, contextual category correction,
+  and one-click summarization in Gmail web/mobile.
 
 ## Architecture
 
@@ -209,10 +209,13 @@ records the live results verified during the August 2026 Gmail test run.
   process-local; multiple workers can duplicate recurring triage.
 - Mount `APP_DB_PATH` on durable storage. SQLite contains OAuth tokens, learned
   memory, deadlines, priority, and settings.
-- One-time scheduled runs are currently in memory and must be recreated after a
-  restart. Recurring auto-triage intervals are persisted and restored.
-- The Gmail add-on uses one shared secret for the pilot. Public multi-tenant use
-  should replace it with Google identity-token verification bound to the user.
+- One-time schedules and recurring auto-triage intervals are persisted in
+  SQLite and restored after restart. Active run progress and cancellation remain
+  process-local, which is another reason to use one worker.
+- The Gmail add-on always requires the shared secret. When
+  `ADDON_GOOGLE_AUDIENCE` is configured, the backend also verifies the signed
+  Apps Script identity token and binds its email claim to the requested user.
+  Keep identity-token verification enabled for any multi-user deployment.
 
 ## The Google "unverified app" screen
 
