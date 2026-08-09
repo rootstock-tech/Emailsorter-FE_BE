@@ -40,10 +40,24 @@ function escapeHtml_(text) {
 
 function formValue_(e, fieldName, fallback) {
   var inputs = e && e.commonEventObject && e.commonEventObject.formInputs;
+  var dateInput = inputs && inputs[fieldName] && inputs[fieldName].dateInput;
+  if (dateInput && dateInput.msSinceEpoch !== undefined) {
+    return String(dateInput.msSinceEpoch);
+  }
   var values = inputs && inputs[fieldName] && inputs[fieldName].stringInputs;
   if (values && values.value && values.value.length) return values.value[0];
   if (e && e.formInput && e.formInput[fieldName]) return e.formInput[fieldName];
   return fallback;
+}
+
+function dateInputToIso_(value) {
+  var milliseconds = Number(value);
+  if (!Number.isFinite(milliseconds)) return '';
+  return Utilities.formatDate(
+    new Date(milliseconds),
+    'UTC',
+    'yyyy-MM-dd'
+  );
 }
 
 function parseJson_(res) {
@@ -396,6 +410,12 @@ function buildHomeCard_() {
     );
   } else {
     section.addWidget(
+      CardService.newDatePicker()
+        .setTitle('Sort up to')
+        .setFieldName('date')
+        .setValueInMsSinceEpoch(Date.now())
+    );
+    section.addWidget(
       CardService.newDecoratedText().setTopLabel('Sort mail from').setText('How far back')
     );
     section.addWidget(
@@ -515,7 +535,12 @@ function buildHomeCard_() {
 function runTriage(e) {
   var email = getUserEmail_();
   var range = formValue_(e, 'range', '1d');
-  var res = apiPost_('/api/addon/triage', { email: email, range: range });
+  var date = dateInputToIso_(formValue_(e, 'date', String(Date.now())));
+  var res = apiPost_('/api/addon/triage', {
+    email: email,
+    range: range,
+    date: date,
+  });
   var msg =
     res && res.status === 'running'
       ? 'A run is already in progress.'

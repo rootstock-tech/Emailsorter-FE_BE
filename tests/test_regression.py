@@ -568,6 +568,9 @@ class AddonContractTests(unittest.TestCase):
         self.assertIn("/api/addon/message-context", code)
         self.assertIn("/api/addon/feedback", code)
         self.assertIn("Save & Teach Assistant", code)
+        self.assertIn("CardService.newDatePicker()", code)
+        self.assertIn("dateInputToIso_", code)
+        self.assertIn("date: date", code)
 
 
 class DeploymentSafetyTests(unittest.TestCase):
@@ -655,6 +658,50 @@ class DeploymentSafetyTests(unittest.TestCase):
             email = server._addon_verified_email(request, "other@example.com")
 
         self.assertIsNone(email)
+
+    def test_addon_triage_forwards_selected_date_and_range(self):
+        request = self.Request(
+            body={
+                "email": "user@example.com",
+                "range": "1w",
+                "date": "2026-08-08",
+            }
+        )
+        tasks = BackgroundTasks()
+        with (
+            patch("app.server._addon_authorized", return_value=True),
+            patch("app.server._addon_verified_email", return_value="user@example.com"),
+            patch("app.server.get_user_token", return_value="token"),
+            patch("app.server._service_for_user", return_value="service"),
+        ):
+            response = asyncio.run(server.api_addon_triage(request, tasks))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(tasks.tasks), 1)
+        self.assertEqual(
+            tasks.tasks[0].args,
+            ("user@example.com", "service", "1w", "2026-08-08"),
+        )
+
+    def test_addon_triage_rejects_invalid_date(self):
+        request = self.Request(
+            body={
+                "email": "user@example.com",
+                "range": "1d",
+                "date": "not-a-date",
+            }
+        )
+        tasks = BackgroundTasks()
+        with (
+            patch("app.server._addon_authorized", return_value=True),
+            patch("app.server._addon_verified_email", return_value="user@example.com"),
+            patch("app.server.get_user_token", return_value="token"),
+            patch("app.server._service_for_user", return_value="service"),
+        ):
+            response = asyncio.run(server.api_addon_triage(request, tasks))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(len(tasks.tasks), 0)
 
     def test_unsafe_production_configuration_fails_fast(self):
         with (

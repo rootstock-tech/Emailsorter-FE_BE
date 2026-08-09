@@ -854,17 +854,25 @@ async def api_addon_triage(request: Request, background_tasks: BackgroundTasks):
     if not email or get_user_token(email) is None:
         return JSONResponse({"error": "user not connected"}, status_code=404)
 
-    progress = _progress_by_user.setdefault(email, _default_progress())
-    if progress["status"] == "running":
-        return JSONResponse({"status": "running"})
     service = _service_for_user(email)
     if service is None:
         return JSONResponse({"error": "user not connected"}, status_code=404)
     sort_range = (body or {}).get("range")
     if sort_range not in RANGE_DAYS:
         sort_range = "1d"
+    date = (body or {}).get("date")
+    if date:
+        try:
+            parsed_date = datetime.strptime(date, "%Y-%m-%d")
+            if parsed_date.strftime("%Y-%m-%d") != date:
+                raise ValueError
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "date must be YYYY-MM-DD"}, status_code=400)
+    progress = _progress_by_user.setdefault(email, _default_progress())
+    if progress["status"] == "running":
+        return JSONResponse({"status": "running"})
     progress.update(status="running", counts=None, error=None, percent=0, first_chunk_done=False)
-    background_tasks.add_task(_run_triage, email, service, sort_range, None)
+    background_tasks.add_task(_run_triage, email, service, sort_range, date or None)
     return JSONResponse({"status": "started"})
 
 
