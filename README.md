@@ -199,7 +199,9 @@ Run the isolated regression suite from the project root:
 
 The suite uses a temporary SQLite database and mocked Gmail/Groq clients; it
 does not change the connected inbox or production `app.db`. Before deployment,
-also run the live smoke checks in `RUNBOOK.md` against the running backend.
+follow [`GMAIL_TESTING.md`](GMAIL_TESTING.md) for the documented real-inbox,
+add-on, OAuth onboarding, reminder, reply, and learning checks. The guide also
+records the live results verified during the August 2026 Gmail test run.
 
 ## Pilot deployment constraints
 
