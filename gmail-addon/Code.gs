@@ -294,6 +294,13 @@ function connectGmailLink_() {
     .setOnClose(CardService.OnClose.RELOAD_ADD_ON);
 }
 
+function dashboardLink_() {
+  var cfg = getConfig_();
+  return CardService.newOpenLink()
+    .setUrl(cfg.backendUrl + '/')
+    .setOpenAs(CardService.OpenAs.FULL_SIZE);
+}
+
 function openAttentionMails(e) {
   var email = getUserEmail_();
   var digest = apiGet_('/api/addon/digest?email=' + encodeURIComponent(email));
@@ -518,6 +525,12 @@ function buildHomeCard_() {
       'Sorting runs automatically in the background; labels appear on your mail ' +
         'in Gmail. Use this only to trigger a run or change the schedule.'
     )
+  );
+
+  section.addWidget(
+    CardService.newTextButton()
+      .setText('Open web dashboard')
+      .setOpenLink(dashboardLink_())
   );
 
   var builder = CardService.newCardBuilder()

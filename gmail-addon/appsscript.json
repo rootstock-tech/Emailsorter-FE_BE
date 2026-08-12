@@ -9,6 +9,9 @@
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/script.external_request"
   ],
+  "urlFetchWhitelist": [
+    "https://your-backend-url.example.com/"
+  ],
   "addOns": {
     "common": {
       "name": "Email Triage Assistant",
