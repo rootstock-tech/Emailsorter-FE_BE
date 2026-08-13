@@ -415,6 +415,12 @@ function buildHomeCard_() {
         .setText('Refresh')
         .setOnClickAction(CardService.newAction().setFunctionName('refreshCard'))
     );
+    section.addWidget(
+      CardService.newTextParagraph().setText(
+        'Sorting is running. This screen does not update on its own \u2014 ' +
+          'wait a little, then tap Refresh to check if it is done.'
+      )
+    );
   } else {
     section.addWidget(
       CardService.newDatePicker()
@@ -436,6 +442,13 @@ function buildHomeCard_() {
       CardService.newTextButton()
         .setText('Run triage now')
         .setOnClickAction(CardService.newAction().setFunctionName('runTriage'))
+    );
+    section.addWidget(
+      CardService.newTextParagraph().setText(
+        'Approx time \u2014 Up to 1 day: ~1\u20132 min \u00b7 Up to 1 week: ~3\u20135 min ' +
+          '(varies with inbox size). This screen does not auto-update; after ' +
+          'starting, tap Refresh to check progress.'
+      )
     );
   }
 
